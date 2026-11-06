@@ -1,95 +1,69 @@
-# LG-EYEAR — Proactive Home Orchestration & 3D Simulation
+# EYEAR System Integration
 
-**EYEAR: Eyes and Ears for Proactive Smart Home Orchestration through Spatial Awareness and Multi-Agent Collaboration**
+Eyes and Ears for Proactive Smart Home Orchestration through Spatial Awareness and Multi-Agent Collaboration
 
-Main integration repository for the EYEAR academic prototype (Hanyang University, Fall 2026; CSE406 / ITE351).
+This is the shared integration entry point. It owns cross-module contracts, scenario fixtures, compatible component versions, and end-to-end verification. Perception, World Model, Orchestrator, and application source code remain in their owner repositories.
 
-> **Status:** Architecture and requirements defined; implementation status and setup instructions will be updated as components become executable. This repository does not imply official LG ThinQ ON integration or physical appliance control.
+> Status: repository scaffold and implementation plan. This upload kit does not contain runnable services, approved new contracts, trained models, or measured results. Preserve existing implementation files when adding this scaffold.
 
-## Scope
+> Independent academic prototype. EYEAR is not an official LG Electronics product. The course prototype does not modify ThinQ ON firmware, integrate with the production ThinQ application, or control physical LG appliances.
 
-1. Ingest validated, timestamped **Semantic Events** from emulated EYEAR Nodes or authored scenarios.
-2. Maintain a multi-room **Home World Model** with occupancy, identity uncertainty, activity hypotheses, appliance states, and event history.
-3. Request **role-based agents** to produce structured proposals or restrictions (initially **Cleaning** and **Activity/Quiet**).
-4. Use a **Home Orchestrator** to select/replan tasks; support an optional pretrained LLM supervisor for contextual interpretation and explanations.
-5. Enforce **deterministic policies**, device capabilities, user overrides, and safety restrictions before action execution.
-6. Send **Action Plans** to the 3D smart-home virtual-appliance adapter and receive **Action Results**.
-7. Replay multiple recorded sensor sources on a common scenario clock, with inference executed in the [AI repository](https://github.com/HY-LG-EYEAR/LG-EYEAR-ai).
+## Component map
 
-## Core Pipeline
+| Repository | Owner | Responsibility |
+| --- | --- | --- |
+| [.github](https://github.com/HY-LG-EYEAR/.github) | Shared | Organization profile and repository navigation |
+| [LG-EYEAR](https://github.com/HY-LG-EYEAR/LG-EYEAR) | Shared | Integration, shared contracts, scenario fixtures, and reproducible demo configuration |
+| [eyear-node](https://github.com/HY-LG-EYEAR/eyear-node) | Banseok Shin | Local perception, sensor fusion, speech input/output, and semantic event publishing |
+| [eyear-worldmodel](https://github.com/HY-LG-EYEAR/eyear-worldmodel) | Hyochang Lee | Whole-home state fusion, virtual appliances, and home simulation |
+| [eyear-orchestrator](https://github.com/HY-LG-EYEAR/eyear-orchestrator) | Jungbin Song | Four agents, central arbitration, policy validation, dialogue, and agent experiments |
+| [eyear-app](https://github.com/HY-LG-EYEAR/eyear-app) | Yewon Joung | Next.js frontend and Spring Boot application backend |
+| [LG-EYEAR-docs](https://github.com/HY-LG-EYEAR/LG-EYEAR-docs) | Shared | CSE406 IEEE LaTeX sources and software engineering deliverables |
+| [LG-EYEAR-blog](https://github.com/HY-LG-EYEAR/LG-EYEAR-blog) | Shared | ITE351 datasets, methodology, evaluation, and technical blog |
 
-```text
-Live/Recorded Node Adapter ─┐
-                            ├→ Semantic Event API → World Model → Domain Agents
-3D Scenario Input ──────────┘                                    │
-                                                        Home Orchestrator
-                                                        (optional LLM)
-                                                               │
-                                                      Policy Validator
-                                                               │
-                                                      Action Plan / API
-                                                               │
-                                              3D Virtual Appliances → Feedback
-```
-
-## Initial Demonstration Scenarios
-
-**Adaptive robot cleaning** — Choose feasible rooms based on occupancy, activity restrictions and remaining cleaning work; replan when an occupant enters an intended room.
-
-**Activity-aware quiet coordination** — Combine room occupancy, speech-activity signals and optionally simulated meeting status to infer a *possible* noise-sensitive situation; coordinate virtual robot-vacuum and laundry decisions. Do not treat speech alone as meeting proof.
-
-The 3D client is an interactive execution/visualization environment, **not** a substitute for running the central decision pipeline.
-
-## Proposed Structure
+## Integration flow
 
 ```text
-backend/
-  api/                  # REST/WebSocket endpoints
-  contracts/            # SemanticEvent, WorldState, AgentProposal, ActionPlan/Result
-  event_ingestion/      # timestamp ordering, deduplication, validation
-  world_model/          # room / people / device states
-  agents/               # cleaning, quiet/activity; other roles when justified
-  orchestration/        # conflict resolution / optional LLM interface
-  policy/               # hard restrictions and capabilities
-  adapters/             # virtual appliance actions / feedback
-replay/
-  clock/                # shared replay clock
-  scenarios/            # manifests and non-sensitive scenario descriptions
-simulation/
-  headless/             # deterministic scenarios / optional RL environments
-  evaluation/           # fixed-rule vs replanning comparisons
-digital-twin/           # Unity or Godot project (engine to be selected)
-tests/
-  unit/
-  integration/
-  scenarios/
+eyear-node -> World Model -> Orchestrator -> virtual appliance adapter
+                 ^                              |
+                 +------- execution feedback ---+
+eyear-app (Next.js + Spring Boot) <-> Orchestrator
+Orchestrator <-> Node voice I/O
 ```
 
-## Shared Contracts (to be versioned)
+Node-to-World messaging is planned over MQTT. World-to-Orchestrator transport is planned as a local HTTP interface. Exact routes, topics, coordinate conventions, and new contract versions require owner agreement. The previous WorldSnapshot 1.0 contract does not fully represent the new demonstration.
 
-- `SemanticEvent`: `schema_version`, `event_id`, `node_id`, `timestamp`, `room_id`, `observation_type`, `value`, `quality`.
-- `WorldState`: timestamped room, person/track, activity-hypothesis, and appliance state snapshot.
-- `AgentProposal`: proposed actions, applicability, constraints, expected effects, reason codes.
-- `ActionPlan`: selected virtual commands, preconditions, priority, traceable plan ID.
-- `ActionResult`: accepted/rejected/completed/failed, execution timestamp, failure reason.
+## Repository contents
 
-**Contract tests** must ensure sensor replay and authored scenarios enter the same pipeline.
+| Path | Purpose |
+| --- | --- |
+| `contracts/` | Contract inventory, schema publication rules, and validation examples |
+| `scenarios/` | The evening scenario and expected actions |
+| `integration-tests/` | Cross-service acceptance cases |
+| `scripts/` | Reserved for verified startup, shutdown, and health-check scripts |
+| `deploy/` | Reserved for tested deployment configuration |
+| `docs/` | Architecture and integration procedures |
+| `components.lock.json` | Intended component URLs; exact versions are not yet selected |
 
-## Testing and Evaluation
+## Getting started
 
-- Room occupancy and unknown-state handling
-- Proposal conflict resolution and explicit override precedence
-- Replanning after significant context change
-- Rejection of malformed events or unsupported commands
-- Perception-to-decision and decision-to-visualization latency
-- Repeatability of synchronized replay
+1. Read [the architecture](docs/architecture.md) and [integration procedure](docs/integration-guide.md).
+2. Agree on a contract release using [the contract inventory](contracts/README.md).
+3. Check out compatible component revisions; null revisions in the manifest mean integration is not yet reproducible.
+4. Follow each component's verified setup instructions, then add the tested integration commands here.
+5. Run the evening scenario and record actual versus expected results.
 
-## Planned Development Stack
+No one-command launcher or container deployment is included yet. Do not present proposed paths as working commands. Integrate first with mocks and replace them one at a time; do not defer integration until the final presentation week.
 
-Python / FastAPI / Pydantic for central services; MQTT or WebSocket/REST for messaging; Unity or Godot for 3D; optional OR-Tools for planning. Exact versions, hardware, costs, and design rationale will be documented in the [CSE406 Specification](https://github.com/HY-LG-EYEAR/LG-EYEAR-docs). Do not treat these choices as already implemented.
+## Demonstration and acceptance
 
-## Related Repositories
+The [evening scenario](scenarios/evening.json) covers the t0-t7 narrative. It is an authored fixture, not a Node event or WorldSnapshot payload. An adapter must translate it using approved contracts. See [acceptance cases](integration-tests/README.md).
 
-- [LG-EYEAR-ai](https://github.com/HY-LG-EYEAR/LG-EYEAR-ai)
-- [LG-EYEAR-docs](https://github.com/HY-LG-EYEAR/LG-EYEAR-docs)
-- [LG-EYEAR-blog](https://github.com/HY-LG-EYEAR/LG-EYEAR-blog)
+## Contract and version policy
+
+Publish reviewed JSON Schema and matching examples together. Python models may be the authoring source; Java and TypeScript consumers must validate the same contract and cases. Do not load schema files from a moving GitHub branch at runtime. Pin a contract release and component revision in each demonstrated build.
+
+## Course materials
+
+- [CSE406 sources and submissions](https://github.com/HY-LG-EYEAR/LG-EYEAR-docs)
+- [ITE351 datasets, methods, and evaluation](https://github.com/HY-LG-EYEAR/LG-EYEAR-blog)
