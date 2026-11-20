@@ -1,0 +1,2019 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage{cite}
+\usepackage{array}
+\usepackage{url}
+\def\UrlBreaks{\do\/\do\-\do\_\do\.}
+\usepackage{booktabs}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{tabularx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{placeins}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\fld}[1]{\texttt{\detokenize{#1}}}
+% Breakable typewriter text for long identifiers and paths (body text and tables only)
+\DeclareUrlCommand\brk{\urlstyle{tt}}
+% Screenshot helper: shows the image if the file was uploaded to Overleaf,
+% otherwise a framed placeholder so that the document still compiles.
+\newcommand{\shot}[3]{%
+  \IfFileExists{#1}{\includegraphics[width=#2]{#1}}{%
+    \fbox{\parbox[c][2.6cm][c]{#2}{\centering\footnotesize Screenshot placeholder:\\ #3\\ (upload \fld{#1})}}}}
+
+\title{EYEAR: Eyes and Ears for Proactive Smart Home Orchestration through Spatial Awareness and Multi-Agent Collaboration}
+
+\author{
+\IEEEauthorblockN{Jungbin Song}
+\IEEEauthorblockA{
+Dept. Information Systems\\
+Hanyang University\\
+Seoul, Republic of Korea\\
+happysongjb@hanyang.ac.kr
+}
+\and
+\IEEEauthorblockN{Banseok Shin}
+\IEEEauthorblockA{
+Dept. Information Systems\\
+Hanyang University\\
+Seoul, Republic of Korea\\
+sbs000126@hanyang.ac.kr
+}
+\and
+\IEEEauthorblockN{Hyochang Lee}
+\IEEEauthorblockA{
+Dept. Information Systems\\
+Hanyang University\\
+Seoul, Republic of Korea\\
+hyo8993@hanyang.ac.kr
+}
+\and
+\IEEEauthorblockN{Yewon Joung}
+\IEEEauthorblockA{
+Dept. Information Systems\\
+Hanyang University\\
+Seoul, Republic of Korea\\
+jyw0495@hanyang.ac.kr
+}
+}
+
+\begin{document}
+\raggedbottom
+\maketitle
+
+\begin{center}
+\vspace{0.2em}
+{\small
+\textbf{Group: EYEAR}\\
+Topic: Proactive smart-home orchestration with distributed perception nodes and role-based agents\\
+Project organization: \url{https://github.com/HY-LG-EYEAR}
+}
+\end{center}
+
+\begin{abstract}
+Smart homes connect appliances and support user commands and
+scheduled routines, but coordinating devices around occupants'
+changing activities remains challenging. We propose \emph{EYEAR}
+(EYE + EAR), a distributed perception and proactive orchestration
+system intended to extend the contextual awareness of an AI home
+hub such as LG ThinQ ON. An EYEAR Node combines a camera,
+microphone, speaker, two mmWave radars, and local pretrained
+models, and reports timestamped semantic observations rather than
+raw audiovisual streams. A household World Model fuses the
+observations into a versioned whole-home snapshot. Four role-based
+agents (cleaning, noise, temperature, and lighting) produce
+structured proposals; a central orchestrator accepts proposals that
+do not conflict and, for each conflict, lets a language model select
+one of the options the agents proposed, with a deterministic
+fallback. Every resulting command is validated against device
+capabilities, freshness, manual overrides, and user restrictions.
+When an occupant appears to be resting, the system asks by voice
+whether the occupant is going to sleep instead of guessing, and
+the occupant can give direct voice commands. The demonstration is
+a household evening scenario with adaptive robot cleaning,
+activity-aware quiet coordination, and preference-based air
+conditioning. This document revises the earlier specification to
+match the implementation and adds the architecture design, the
+implemented modules, and use cases. The course prototype uses one
+physical Node, simulated rooms and appliances, and a mobile
+application; it does not modify ThinQ ON firmware or control
+physical LG devices.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Smart Home, Multimodal Perception, mmWave Radar,
+Human Activity Recognition, Voice Interaction,
+Multi-Agent Orchestration, Context-Aware Planning
+\end{IEEEkeywords}
+
+\begin{table*}[!t]
+\caption{Role Assignments}
+\label{tab:roles}
+\centering
+\small
+\begin{tabular}{L{0.22\textwidth}L{0.12\textwidth}L{0.58\textwidth}}
+\toprule
+\textbf{Role} & \textbf{Name} & \textbf{Responsibilities} \\
+\midrule
+AI Agent \& Control Systems Engineer \& Customer
+& Jungbin Song
+& Designs and implements the four agents and the central
+orchestrator that turns the home-wide state into validated
+appliance commands and Node speech. \\
+
+Development Manager
+& Jungbin Song
+& Coordinates milestones, interface agreements, integration
+readiness, task tracking, and submission preparation. \\
+
+Edge AI \& Sensor Systems Engineer
+& Banseok Shin
+& Builds the in-room sensor Node, the MQTT broker setup, and the
+on-device perception and voice input/output. \\
+
+Data Fusion \& Simulation Engineer
+& Hyochang Lee
+& Fuses Node messages into the home-wide World Model and builds
+the 3D smart-home simulation. \\
+
+Full-Stack Software Engineer \& User
+& Yewon Joung
+& Builds the mobile application and its backend. \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Introduction}
+
+\subsection{Motivation and Background}
+
+Connected appliances can be operated through applications, voice
+commands, schedules, and sensor-triggered routines. Yet a
+collection of independently automated appliances may respond
+poorly when household activities change. For example, a robot
+vacuum that is about to enter a bedroom should not simply continue
+when someone has just walked in; it should step back to its dock,
+keep the unfinished room as remaining work, and come back when the
+room is empty again. Similarly, an occupant who has lain down to
+rest may justify keeping the vacuum out of the room, switching a
+nearby washing machine to a low-noise mode, and, once the occupant
+confirms that they are going to sleep, closing the curtains and
+turning off the lights. EYEAR focuses on translating occupants'
+observable context into coordinated appliance actions rather than
+solely detecting presence or issuing fixed commands.
+
+\subsection{Problem Statement and User Needs}
+
+A multi-room household needs to (1) determine which spaces are
+occupied and what broad activities may be occurring; (2) combine
+visual, acoustic, and spatial evidence without depending on
+perfect face recognition; (3) coordinate appliance tasks under
+changing room availability and disturbance constraints;
+(4) show why decisions were made and permit user overrides,
+including direct voice commands; (5) limit exposure of sensitive
+audiovisual data; and (6) confirm uncertain states, such as whether
+a resting occupant is going to sleep, by asking the occupant
+rather than guessing, while respecting each resident's stored
+preferences such as preferred temperature. These are proposed
+needs for an academic system concept, not verified requirements
+supplied by LG Electronics. The student prototype must also
+demonstrate the complete observation-to-action pipeline without
+proprietary appliance interfaces.
+
+\subsection{Related Software and Technical Context}
+
+LG Electronics has introduced ThinQ ON as a central AI home hub
+designed to integrate connected devices and provide services
+tailored to users' preferences and spatial contexts
+\cite{lg2024}. EYEAR builds on this AI Home vision by proposing
+distributed perception nodes that supply additional visual,
+acoustic, and spatial observations to a central home
+orchestration system. EYEAR does not claim that context-aware
+appliance orchestration is a new concept; its focus is integrating
+distributed sensing with testable action planning and replanning.
+
+For non-visual sensing, the ESPHome project provides software
+support for the HLK-LD2450, a 24\,GHz mmWave radar module designed
+for indoor motion target tracking. Its integration exposes target
+position, distance, angle, and speed measurements through a UART
+interface \cite{esphome_ld2450}. A companion module, the
+HLK-LD2410C, reports presence including motionless persons
+\cite{hlk_ld2410c}. Radar alone does not establish personal
+identity or recognize fine-grained activities. EYEAR therefore
+combines modality-specific observations to improve household
+context awareness.
+
+\subsection{System Concept, Boundary, and Terminology}
+
+\emph{EYEAR} denotes the complete proposed system.
+An \emph{EYEAR Node} is a room-level accessory containing a camera,
+microphone, speaker, mmWave radars, processing hardware, and local
+perception software. Separate vision, audio, and radar components
+analyze their inputs, and a fusion component produces structured
+\emph{room state messages}. Multiple Nodes feed the
+\emph{World Model}, which maintains occupants, rooms, and appliance
+states and sends a versioned whole-home \emph{WorldSnapshot} to the
+central service.
+
+\emph{Role-Based Agents} (cleaning, noise, temperature, and
+lighting) generate proposals: actions, restrictions on other
+agents' actions, and questions. The central \emph{Home
+Orchestrator}, conceptually associated with ThinQ ON, merges the
+proposals. Only when proposals conflict does a pretrained
+\emph{LLM Supervisor} select one of the conflicting options, through
+schema-validated structured output; deterministic checks govern
+what is executed. The LLM is not trained and cannot create new
+commands. The Orchestrator also composes the sentences a Node
+speaks and answers direct voice commands introduced by a wake
+phrase. An \emph{Application Layer} provides preference settings,
+device views, and controls in a ThinQ-style mobile interface, and
+a browser-based \emph{3D Smart Home Simulation} represents rooms,
+occupants, and virtual appliances.
+
+The \textbf{proposed product} uses multiple dedicated Nodes and
+the ThinQ ON ecosystem. The \textbf{course prototype} runs the
+Node on a laptop with attached radars; only Room~1 has a physical
+Node, and the other rooms are fed by simulated Nodes. Central
+services are to run on independent laptops in one local network. The
+prototype excludes embedded hardware manufacturing, ThinQ ON
+firmware deployment, physical LG appliance control, and
+integration into the production LG ThinQ application.
+
+\section{Requirements}
+
+\subsection{Household Scenarios and User Interaction}
+
+\textbf{R-01 (Adaptive cleaning).}
+The system shall keep the remaining rooms of a cleaning routine
+as an ordered task list and shall not repeat rooms already
+completed. A vacuum shall start or resume cleaning a room only when
+current evidence confirms that the room is empty; an occupied room,
+an unknown occupancy, or an outdated empty report shall hold the
+work. When the next room of a plan that is already running becomes
+occupied before the vacuum enters it, the system shall arbitrate
+between continuing the plan and returning to the dock, record the
+choice and its reason, and return to the dock under the
+deterministic policy. The vacuum may pass through occupied spaces
+while returning. A held room shall be resumed after confirmed
+vacancy.
+
+\textbf{R-02 (Activity-aware quiet coordination).}
+When an occupant appears to be resting, the system shall apply
+R-01 to the vacuum (propose returning to the dock instead of
+entering the room, and hold any start while the room is not
+confirmed empty), switch a noisy neighboring appliance (the washing
+machine) to a low-noise mode instead of stopping it, and ask the
+occupant at most once per rest period whether they are going to
+sleep. The sleep automation shall close the curtains and turn off
+the lights only after an affirmative answer; a negative, ambiguous,
+or missing answer shall leave them unchanged. Direct voice commands
+are handled separately (R-27). A resting inference alone shall
+not establish sleep. Meeting-like quiet situations are outside the
+implemented scope.
+
+\textbf{R-03 (User control and explanations).}
+The system shall make observed states, agent proposals, selected
+actions, voice dialogue, and reasons for held or rejected actions
+inspectable. An operator shall be able to pause and resume
+automatic control and reset the central decision state; a pause
+shall not block direct voice commands. Explicit user restrictions
+and direct user commands shall supersede automatic plans.
+
+\subsection{EYEAR Node and Local Perception}
+
+\textbf{R-04 (Node composition).}
+The Node shall combine camera, microphone, speaker, mmWave radar,
+local processing, and a network interface as one logical room-level
+accessory. The prototype uses a laptop's camera, microphone,
+speaker, and processor with an HLK-LD2450 tracking radar and an
+HLK-LD2410C presence radar. Several Nodes shall be representable in
+one home; simulated Nodes use the same message format.
+
+\textbf{R-05 (Specialized local processing).}
+Visual, acoustic, and radar analysis shall be independently
+replaceable components using lightweight pretrained models or
+sensor processing. Fusion occurs after modality-specific
+observations are produced.
+
+\textbf{R-06 (Visual observations).}
+The vision component shall detect people and produce track,
+posture (standing, sitting, lying, walking, unknown), and activity.
+Resting shall be reported only when lying posture and image--text
+evidence agree for a configurable duration. Face recognition shall
+identify enrolled residents and report unknown otherwise.
+
+\textbf{R-07 (Acoustic observations).}
+The audio component shall produce acoustic context labels and
+transcribe speech locally only for replies and wake-phrase
+commands; raw audio shall not leave the Node. Unavailable or
+ambiguous audio evidence shall be explicitly representable.
+
+\textbf{R-08 (mmWave observations).}
+The radar adapter shall read target positions and motion from the
+tracking radar and static presence from the presence radar, so that
+a motionless occupant remains represented as present. The system
+shall not assume that radar identifies individuals or determines
+fine posture.
+
+\textbf{R-09 (Multimodal fusion).}
+The Node shall align timestamps, convert positions into a
+documented room frame, and associate camera and radar tracks. When
+camera visibility is lost (for example, after lights-off), an
+identity established earlier may be carried over through track
+continuity with a distinct identity source. An unavailable
+modality shall lower certainty, not supply a fabricated result.
+
+\textbf{R-10 (Raw-media boundary).}
+Raw visual and audio data shall remain inside the Node. Central
+interfaces receive semantic observations, recognized reply or
+command text, and derived context only.
+
+\subsection{Distributed Events and Home Context}
+
+\textbf{R-11 (Semantic message format).}
+Each Node room-state message shall carry a schema version, event
+identifier, boot identifier, per-Node sequence number, source Node,
+timestamp, room, message type, room occupancy, and confidence;
+person, posture, activity, audio, and brightness results shall use
+documented fields. Node status and voice messages follow their own
+documented schemas. Invalid messages shall be rejected.
+
+\textbf{R-12 (Multi-Node aggregation).}
+The World Model shall ingest messages from multiple Nodes, track
+source availability and restarts, and prevent stale observations
+from overwriting newer states. A missing observation shall not be
+interpreted as an empty room.
+
+\textbf{R-13 (Home World Model).}
+The World Model shall maintain room occupancy, people with
+identity uncertainty, activity, positions, appliance states,
+preferences, routines, and room relationships, and shall send the
+Orchestrator a versioned, schema-validated snapshot. Uncertainty
+shall remain visible.
+
+\textbf{R-14 (Task-relevant context).}
+The system shall derive whether a room may be cleaned, whether an
+occupant is resting so that a quiet preference applies, and whether
+a sleep question is appropriate, and may confirm uncertain
+inferences with the occupant's spoken answer.
+
+\subsection{Role-Based Agents and Central Orchestration}
+
+\textbf{R-15 (Agent proposals).}
+Four agents shall read the same snapshot and produce structured
+proposals; they advise only. The cleaning agent proposes keeping a
+running plan or starting the remaining rooms; the noise agent
+proposes restrictions, low-noise modes, and a return to the dock;
+the temperature agent proposes target temperature and airflow from
+the preferences of the residents present; the lighting agent
+proposes a sleep-intent question and, after an affirmative answer,
+the curtain and light actions.
+
+\textbf{R-16 (Central LLM supervisor).}
+For each conflict between proposals, the Orchestrator shall offer
+the conflicting proposals as options to a pretrained LLM, which
+returns the chosen option identifier and a short reason in a
+declared schema. Non-conflicting proposals shall not require the
+LLM. Invalid, refused, or timed-out output shall invoke a
+deterministic fallback. Training an LLM is not required.
+
+\textbf{R-17 (Validation and precedence).}
+Before execution, every action, including LLM-selected and
+fallback actions, shall be validated against device capabilities,
+parameter ranges, device-state freshness, manual overrides, and
+explicit user restrictions; automatic actions shall also not
+duplicate a command that is still pending. Direct user commands
+shall take precedence over automatic plans while remaining subject
+to the same device and restriction checks; duplicated voice events
+are discarded.
+
+\textbf{R-18 (Replanning triggers).}
+Meaningful changes in occupancy, activity, devices, routines,
+preferences, or dialogue shall trigger re-evaluation; unchanged
+heartbeats shall not.
+
+\textbf{R-19 (Decision trace).}
+Each decision shall be stored with its plan identifier, trigger,
+snapshot revision, proposals, conflicts and choices, arbitration
+mode, issued commands, rejected or held actions with reason codes,
+and speech. Device results shall be correlated with issued commands
+by command identifier.
+
+\textbf{R-20 (Lightweight learned scoring).}
+Agents may use lightweight learned models trained on
+simulator-generated data, compared against rule baselines. If a
+model is missing or invalid, the agent shall fall back to its rule.
+
+\subsection{Interactive Demonstration}
+
+\textbf{R-21 (3D home and appliances).}
+The prototype shall represent rooms, virtual occupants, and
+appliances in an interactive 3D home, including the vacuum's route,
+appliance states, and the sensing-to-decision data flow.
+
+\textbf{R-22 (Shared event-to-action pipeline).}
+Live Node input, simulated Nodes, and authored scenarios shall use
+the same message interfaces; the simulation shall return execution
+results for virtual appliances.
+
+\textbf{R-23 (Replay).}
+Scenario replay shall use an explicit scenario clock so that
+recorded timestamps are not rejected against wall time.
+Synchronized replay of multiple recorded Node streams is a
+conditional goal.
+
+\subsection{Non-Functional Requirements}
+
+\textbf{R-24 (Modularity and fallback).}
+Sensors, inference components, the World Model, agents, LLM
+interface, validator, and visualization shall have documented
+interfaces and support testing with mocks. A missing sensor or
+unavailable LLM shall produce explicit degraded behavior.
+
+\textbf{R-25 (Performance and repeatability).}
+The target for a visible decision after a meaningful event is two
+seconds on the rule path; the LLM path is reported separately.
+Scenarios shall support reset, deterministic replay with the
+fallback, and diagnostic logs.
+
+\textbf{R-26 (Security and verification).}
+The prototype shall reject malformed messages and unsupported
+commands, accept voice input only when its Node, room, and request
+identifiers are consistent with the registered Nodes, and avoid
+exposing raw audiovisual data. These checks verify message
+consistency, not the identity of a sender or speaker. The prototype
+runs on a restricted demonstration network, and service
+authentication is not yet implemented; authenticated, encrypted
+communication is required for any deployment beyond it.
+
+\subsection{Voice Interaction and Application Layer}
+
+\textbf{R-27 (Voice interaction).}
+The Orchestrator shall send the text to be spoken to the Node of a
+room. After a question, the Node shall listen within a configured
+window, transcribe detected speech locally, and return the text
+with a confidence value, or a no-response indication, correlated
+with the request. A wake phrase recognized in the local transcript
+shall start a direct command. Interpretation of answers and
+commands shall be performed centrally.
+
+\textbf{R-28 (Application layer).}
+The application shall let users manage homes, rooms, devices, and
+routines, enter per-resident preferences, and show device states in
+a ThinQ-style interface. Preferences shall reach the Orchestrator
+through the snapshot; operator controls shall use the
+Orchestrator's control interface.
+
+\section{Development Environment}
+\label{sec:env}
+
+\subsection{Choice of Software Development Platform}
+
+\subsubsection{Platform and languages}
+
+The prototype uses existing Windows and macOS laptops. A macOS
+laptop supplies the physical Node's camera, microphone, speaker,
+and computation, with two radar modules attached over USB serial
+adapters. The World Model, Orchestrator, and simulation are planned
+to run on other laptops in the same Wi-Fi network, with the MQTT
+broker on the Node laptop; this deployment is still to be
+integrated (Section~\ref{sec:impl}). The external LLM requires Internet access; a deterministic
+fallback covers the scenario without it.
+
+Python is used for perception, fusion, and orchestration because
+the model libraries and Pydantic are available there. The Node
+requires Python 3.11; the World Model and Orchestrator support
+Python 3.11 or later (the Orchestrator models were trained and
+tested with Python 3.13.1). The application uses an Expo (React
+Native) mobile client in TypeScript and a Java Spring Boot backend.
+The 3D simulation is a browser application using Three.js.
+
+\subsubsection{Version control and documentation}
+
+The team uses GitHub for version control and Overleaf for LaTeX.
+Each module has its own repository under the organization on the
+first page; a shared repository holds cross-module messages and the
+connection overview. Source revisions are cited in Section~\ref{sec:impl}.
+
+\subsubsection{Development environment record}
+
+Table~\ref{tab:environment} records the development hardware and
+operating systems. Library versions are recorded per repository
+(dependency files and, for the Orchestrator, the model card).
+
+\begin{table*}[!t]
+\caption{Team Development Environment}
+\label{tab:environment}
+\centering
+\small
+\begin{tabularx}{\textwidth}{
+@{}L{0.13\textwidth}L{0.25\textwidth}L{0.08\textwidth}L{0.22\textwidth}Y@{}
+}
+\toprule
+\textbf{Member} & \textbf{Processor / device}
+& \textbf{Memory} & \textbf{Operating system}
+& \textbf{Main runtime} \\
+\midrule
+Jungbin Song & Intel Core Ultra 7 258V & 32 GB
+& Windows 11 Home & Python 3.13.1 (supports 3.11+) \\
+
+Banseok Shin & Apple M5 Pro & 24 GB
+& macOS Tahoe 26.6.2 & Python 3.11 \\
+
+Hyochang Lee & Intel Core i7-1355U & 16 GB
+& Windows 11 Home, build 26200 & Python 3.11+, browser (Three.js) \\
+
+Yewon Joung & Apple M5 (Air model) & 16 GB
+& macOS Tahoe 26.6 & Node.js (Expo), Java (Spring Boot) \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsubsection{Cost estimation}
+
+Table~\ref{tab:cost} gives provisional incremental costs. Each
+hardware amount is the subtotal for the stated quantity. One of the
+two LD2450 modules is a spare; the LD2410C set includes its USB
+adapter. Already-owned computers incur no additional cost.
+
+\begin{table}[!tbp]
+\caption{Provisional Incremental Cost Estimate (USD)}
+\label{tab:cost}
+\centering
+\footnotesize
+\begin{tabularx}{\columnwidth}{@{}Ycc@{}}
+\toprule
+\textbf{Item} & \textbf{Quantity} & \textbf{Subtotal} \\
+\midrule
+HLK-LD2450 radar (one spare) & 2 & $\approx 16$ \\
+HLK-LD2410C with adapter & 1 & $\approx 6$ \\
+CP2102 USB--TTL module and wires & 1 set & $\approx 5$ \\
+Existing computers & owned & 0 \\
+LLM API planning allowance & project & $\le 10$ \\
+Tools under free licenses/tiers & --- & 0 \\
+\midrule
+\textbf{Total planning allowance} & & $\approx 37$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The API allowance is a planning assumption, not measured spending.
+No cloud hosting is used.
+
+\subsection{Software in Use}
+
+Table~\ref{tab:software} lists the existing software and algorithms
+and distinguishes their outputs from EYEAR-specific processing.
+
+\begin{itemize}
+\item \textbf{Song:} FastAPI and Uvicorn (HTTP service), Pydantic
+(contract and messages), paho-mqtt, the OpenAI Python SDK, NumPy,
+scikit-learn, joblib, and pytest.
+\item \textbf{Shin:} OpenCV, MediaPipe, InsightFace with ONNX Runtime,
+MobileCLIP (open\_clip), YAMNet (TFLite), faster-whisper, WebRTC VAD,
+the macOS \fld{say} voice, pyserial, PyYAML, and paho-mqtt.
+\item \textbf{Lee:} Pydantic for the World Model and contract; Three.js
+for the browser simulation.
+\item \textbf{Joung:} Expo and React Native with TypeScript for the
+mobile app; Spring Boot (Web MVC, Data JPA) with PostgreSQL for the
+backend.
+\end{itemize}
+
+\begin{table*}[!t]
+\caption{Existing Software and Its Intended Use}
+\label{tab:software}
+\centering
+\small
+\begin{tabularx}{\textwidth}{
+@{}L{0.17\textwidth}L{0.25\textwidth}Y@{}
+}
+\toprule
+\textbf{Component} & \textbf{Software / algorithm}
+& \textbf{Use and boundary} \\
+\midrule
+Identity
+& InsightFace / ArcFace \cite{arcface}
+& Face embeddings; EYEAR matches enrolled residents and
+rejects uncertain matches. \\
+
+Posture
+& MediaPipe / BlazePose \cite{mediapipe,blazepose}
+& Body landmarks; project rules derive posture labels. \\
+
+Rest evidence
+& MobileCLIP / CLIP \cite{mobileclip,clip}
+& Image--text matching without task-specific training,
+combined with lying posture over a hold time. \\
+
+Acoustic context
+& YAMNet \cite{yamnet}
+& Audio-event scores mapped to project context labels. \\
+
+Speech recognition
+& Whisper (faster-whisper, small) \cite{whisper}; WebRTC VAD
+& Local transcription of speech segments only; the wake phrase is
+matched in the transcript. \\
+
+Speech output
+& macOS text-to-speech (\fld{say})
+& Plays centrally supplied sentences. \\
+
+Radar integration
+& LD2450 and LD2410C \cite{esphome_ld2450,hlk_ld2410c}
+& Target tracking and static presence over UART;
+no personal identification. \\
+
+Messaging
+& MQTT and Mosquitto \cite{mqtt,mosquitto}
+& Node, voice, and device-command transport through one local broker. \\
+
+Validation
+& Pydantic \cite{pydantic}
+& Typed messages and JSON Schema; validators also check
+references and consistency. \\
+
+Central supervision
+& OpenAI Structured Outputs \cite{openai_struct}
+& Schema-constrained option selection; format compliance
+does not establish decision correctness. \\
+
+Learned scoring
+& scikit-learn \cite{sklearn}
+& Gradient boosting, logistic and ridge regression trained on
+simulator data and compared with rule baselines. \\
+
+3D rendering
+& Three.js
+& Browser rendering of the home, occupants, and appliances. \\
+
+Product context
+& LG ThinQ ON \cite{lg2024}
+& Conceptual home-hub context; no proprietary integration. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsection{Task Distribution}
+
+\begin{table*}[!t]
+\caption{Module Responsibilities}
+\label{tab:tasks}
+\centering
+\small
+\begin{tabularx}{\textwidth}{
+@{}L{0.19\textwidth}L{0.12\textwidth}Y@{}
+}
+\toprule
+\textbf{Module} & \textbf{Owner} & \textbf{Responsibility} \\
+\midrule
+Node (\fld{eyear-node})
+& Shin
+& Sensor interfaces, local perception and fusion, room state
+messages, speech input/output, simulated Nodes, MQTT broker. \\
+
+World Model / simulation (\fld{eyear-worldmodel})
+& Lee
+& Multi-Node ingestion, whole-home state, WorldSnapshot output,
+virtual appliances, 3D visualization. \\
+
+Agents / Orchestrator (\fld{eyear-orchestrator})
+& Song
+& Four agents, conflict arbitration, LLM interface and fallback,
+validation, dialogue state, command dispatch, decision trace,
+learned scoring models. \\
+
+Application (\fld{eyear-app})
+& Joung
+& Mobile app and backend, device and routine management,
+preferences. \\
+
+Integration / verification
+& All
+& Interface agreements, mocks, scenario tests, documentation,
+demonstration. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+Song serves as Development Manager and represents the customer
+perspective in requirement review. Joung represents the user
+perspective.
+
+\section{Specifications}
+\label{sec:spec}
+
+This section specifies behavior through inputs, processing rules,
+outputs, and failure handling. Section~\ref{sec:arch} describes the
+modules that implement it and their current status.
+
+\subsection{Data Flow and Interface Responsibilities}
+\label{sec:flow}
+
+Figure~\ref{fig:flow} separates observation, control, feedback,
+application, and voice interactions.
+
+\begin{figure*}[!t]
+\centering
+\begin{tikzpicture}[
+box/.style={
+draw,
+rounded corners,
+align=center,
+text width=25mm,
+minimum height=15mm,
+font=\footnotesize
+},
+arr/.style={-{Stealth},thick},
+edgeLabel/.style={
+font=\scriptsize,
+fill=white,
+inner sep=1.5pt
+},
+node distance=7mm
+]
+\node[box] (node)
+{Node\\local perception\\and speech I/O};
+
+\node[box,right=of node] (world)
+{World Model\\whole-home state\\and uncertainty};
+
+\node[box,right=of world,text width=30mm] (central)
+{Orchestrator\\four agents,\\arbitration, validation};
+
+\node[box,right=of central] (devices)
+{Virtual devices\\and 3D home\\simulation};
+
+\node[box,below=18mm of central,text width=40mm] (app)
+{Application\\Expo mobile app + Spring Boot};
+
+\draw[arr] (node.east) -- node[above,edgeLabel] {room state} (world.west);
+\draw[arr] (world.east) -- node[above,edgeLabel] {snapshot} (central.west);
+\draw[arr] (central.east) -- node[above,edgeLabel] {command} (devices.west);
+
+\draw[arr] ([xshift=-5mm]central.north) -- ++(0,10mm)
+-| node[pos=0.25,above,edgeLabel] {speech request}
+([xshift=5mm]node.north);
+
+\draw[arr] ([xshift=-5mm]node.north) -- ++(0,18mm)
+-| node[pos=0.30,above,edgeLabel] {reply / direct command}
+([xshift=5mm]central.north);
+
+\draw[arr] (app.west)
+-| node[pos=0.25,above,edgeLabel] {preferences}
+([xshift=5mm]world.south);
+
+\draw[arr] ([xshift=-5mm]app.north)
+-- node[left,edgeLabel] {controls}
+([xshift=-5mm]central.south);
+
+\draw[arr] ([xshift=5mm]central.south)
+-- node[right,edgeLabel,align=left] {decisions}
+([xshift=5mm]app.north);
+
+\coordinate (feedbackBottom) at ([yshift=-12mm]app.south);
+
+\draw[arr] (devices.south) |- (feedbackBottom)
+-| node[pos=0.25,below,edgeLabel] {device state and results}
+(world.south);
+\end{tikzpicture}
+\caption{Logical system interactions. The World Model sends
+snapshots and, as separate messages, forwards correlated device
+results to the Orchestrator. The four agents run inside the
+Orchestrator and read the snapshot it accepted. Crossings without junctions are not
+connections.}
+\label{fig:flow}
+\end{figure*}
+
+Nodes publish room state messages; the World Model sends whole-home
+snapshots; the agents propose and the Orchestrator issues commands.
+Appliance adapters report execution results to the World Model,
+which updates device state and forwards each result to the
+Orchestrator. MQTT carries Node messages, speech, and device
+commands; HTTP carries snapshots, forwarded results, and controls.
+Preference updates go from the application to the World Model and
+appear in the next snapshot. The Orchestrator keeps the dialogue
+state itself; it is not part of the snapshot.
+
+Table~\ref{tab:interfaces} lists the information required at each
+boundary. The interfaces were revised after the previous milestone:
+Node messages are version 0.2 (adding a boot identifier and a
+retained online/offline status message), and the snapshot is
+WorldSnapshot 2.0. Versioned JSON Schema files and examples in each
+repository define exact fields.
+
+\begin{table*}[!t]
+\caption{Required Interface Information}
+\label{tab:interfaces}
+\centering
+\small
+\begin{tabularx}{\textwidth}{
+@{}L{0.17\textwidth}L{0.22\textwidth}Y@{}
+}
+\toprule
+\textbf{Message} & \textbf{Direction / transport}
+& \textbf{Required information} \\
+\midrule
+Room state, Node status
+& Node to World Model; MQTT \brk{eyear/v0/{room}/state}, \brk{.../status}
+& Version, event, boot and Node IDs, sequence, time, room
+occupancy and confidence; people with identity source and
+confidence, position, posture, activity; audio context and
+brightness. Status: online flag (retained, last-will on loss). \\
+
+World snapshot
+& World Model to Orchestrator; HTTP POST \brk{/v2/world/snapshots}
+& Session ID, revision, time and clock mode (live or replay);
+Nodes; rooms with occupancy and evidence freshness; people;
+devices with state and capabilities; profiles, routines, user
+restrictions, room influence. \\
+
+Agent proposal
+& Agent to Orchestrator (in process)
+& Agent, snapshot revision; actions, restrictions, plan-keeping
+intents, questions, scores, reasons. \\
+
+Device command
+& Orchestrator to adapter; MQTT \brk{eyear/v0/device/{id}/command}
+& Command and plan IDs, session ID, based-on revision, issue
+time, device, action, parameters, reason codes.
+Preconditions are checked before dispatch and are not sent. \\
+
+Execution result
+& Adapter via World Model to Orchestrator; HTTP POST \brk{/v2/world/device-results}
+& Session ID, event ID, command ID, device, status (accepted,
+rejected, completed, failed), time; optional revision, observed
+state, and reason. \\
+
+Speech request / reply / command
+& Orchestrator and Node; MQTT \brk{.../speak}, \brk{.../voice/reply}, \brk{.../voice/command}
+& Request ID, text, reply expectation and listening window;
+reply correlated by request ID with text and confidence or
+no-response; direct command text with confidence. Node and room
+must match the topic. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+Messages are validated before use. Uncertain observations use an
+unknown state; unmeasured values are null rather than zero.
+Referenced IDs must exist, a person cannot be in a room reported
+empty, and positions use the documented room frame (origin at the
+room's lower-left corner on the floor plan, x to the right, y up).
+Room occupancy is separate from person tracking: an occupied room
+can have no reliable person position.
+
+\subsection{Node Perception and Local Fusion}
+\label{sec:node}
+
+The camera supplies face and pose evidence, the tracking radar
+supplies target locations and movement, and the presence radar
+supplies room-level presence. Independent components produce
+timestamped observations, and fusion associates compatible tracks
+in the room frame. Audio supplies context labels. Sensor absence or
+poor visibility reduces certainty rather than creating a false
+observation.
+
+Rest inference requires lying posture and image--text agreement
+for a hold time (five seconds in the current configuration).
+Occupancy starts only when the camera or the tracking radar sees a
+person inside the room, because the presence radar also detects
+people behind a wall. In the dark, a person who was lying is
+considered gone only after movement toward the door; until then the
+room remains occupied with confidence 0.6 even if both radars lose
+the person. When the room is bright and the camera sees nobody for
+10 seconds, the lying state is cleared. Algorithm~\ref{alg:node} summarizes the local update.
+
+\begin{algorithm}[!tbp]
+\caption{Local observation update}
+\label{alg:node}
+\footnotesize
+\begin{algorithmic}[1]
+\Require timestamped modality observations and local track history
+\State Validate available inputs and associate compatible tracks
+
+\If{lying posture and rest evidence agree continuously}
+  \State Update hold timer
+  \If{the hold threshold has been reached}
+    \State activity $\gets$ RESTING
+  \Else
+    \State activity $\gets$ UNKNOWN; retain candidate evidence
+  \EndIf
+\Else
+  \State Clear candidate timer; report OTHER only with positive
+  evidence, otherwise UNKNOWN
+\EndIf
+
+\If{a face confidently matches an enrolled resident}
+  \State Bind identity to the track; source $\gets$ FACE
+\ElsIf{an earlier binding has unambiguous continuity}
+  \State Carry identity; source $\gets$ TRACK\_CARRIED
+\Else
+  \State Report unknown identity
+\EndIf
+
+\If{camera or tracking radar sees a person inside the room}
+  \State occupancy $\gets$ OCCUPIED
+\ElsIf{a lying person has no exit evidence (dark, or camera empty $<$ 10\,s)}
+  \State occupancy $\gets$ OCCUPIED (confidence 0.6)
+\ElsIf{absence persists for its confirmation period}
+  \State occupancy $\gets$ EMPTY
+\Else
+  \State occupancy $\gets$ UNKNOWN
+\EndIf
+
+\State Publish changed observations or a one-second heartbeat
+\end{algorithmic}
+\end{algorithm}
+
+Identity established in the light may be retained after lights-off
+through track continuity; this is historical association, not radar
+identification. Confirmed exit, ambiguity, or additional occupants
+invalidate it. Face evidence is checked again after lights-on.
+
+\subsection{World Model and Replanning Triggers}
+\label{sec:world}
+
+For each Node, the World Model tracks sequence, observation time,
+and availability. It drops messages whose event identifier was
+already seen, rejects messages from a Node whose sequence number goes
+backwards, and infers a restart when the sequence returns to zero or
+goes backwards with a newer timestamp; using the boot identifier and
+the status topic for this is pending. Ordering across different Nodes
+and of late device results is not yet enforced. Missing heartbeats mark the source
+stale; they do not establish an empty room. The engine's publishing
+rule (\fld{poll()}) sends a snapshot immediately on a meaningful
+change, at most once per second for value changes, and every 30
+seconds otherwise; the HTTP sender that applies it is pending.
+
+The Orchestrator validates each snapshot (Algorithm~\ref{alg:ingest}).
+It compares only decision-relevant values (occupancy, people and
+activity, device states, routines, preferences, restrictions,
+temperature in 0.5\,$^\circ$C steps, evidence freshness, and the
+deadline band); an unchanged heartbeat does not trigger a decision.
+
+\begin{algorithm}[!tbp]
+\caption{Snapshot acceptance and trigger evaluation}
+\label{alg:ingest}
+\footnotesize
+\begin{algorithmic}[1]
+\Require snapshot $S$, stored snapshot $W$, registered session
+\If{schema or references invalid}
+  \State Reject (HTTP 422); \Return
+\EndIf
+\If{session not registered or clock mode differs}
+  \State Reject (HTTP 409); \Return
+\EndIf
+\If{revision equals the last accepted one}
+  \If{content identical}
+    \State Acknowledge (202) without a new decision; \Return
+  \Else
+    \State Reject (HTTP 409); \Return
+  \EndIf
+\EndIf
+\If{revision is older than the last accepted one}
+  \State Reject (HTTP 409); \Return
+\EndIf
+\If{live mode and the age of $S$ is outside the allowed window}
+  \State Reject (HTTP 422); \Return
+\EndIf
+\State Acknowledge (202); continue asynchronously
+\State $W \gets S$; update history, dialogue episodes, pending commands
+\State $k \gets$ decision-relevant key of $S$, dialogue states, due retries
+\If{$k$ differs from the last key}
+  \State Run the orchestration cycle (Algorithm~\ref{alg:central})
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+Voice replies, direct commands, and operator controls are additional
+triggers, so a reply is handled without waiting for a sensor change.
+
+\subsection{Agent Proposals and Appliance Policies}
+\label{sec:agents}
+
+The four agents read the same snapshot and produce proposals;
+none dispatches commands. Table~\ref{tab:policies} specifies the
+policies for the primary scenario.
+
+\begin{table*}[!t]
+\caption{Primary Appliance Policies and Agent Outputs}
+\label{tab:policies}
+\centering
+\small
+\begin{tabularx}{\textwidth}{
+@{}L{0.11\textwidth}L{0.24\textwidth}Y@{}
+}
+\toprule
+\textbf{Agent} & \textbf{Inputs / output}
+& \textbf{Processing policy} \\
+\midrule
+Cleaning
+& Routines, vacuum state (status, remaining rooms in order),
+cleaning history; output keep-plan intent or start of remaining rooms
+& If the vacuum is already cleaning, propose keeping the plan (no
+command). If it is docked, propose starting the remaining rooms of
+the due routine in routine order. Remaining rooms are the rooms kept
+when the vacuum was recalled, otherwise the routine's rooms, minus
+completed rooms. Occupancy is left to the noise agent. \\
+
+Noise
+& Occupancy and evidence freshness, activity, quiet preferences,
+room influence, device modes; output return-to-dock, restrictions,
+washer mode
+& A room is clear only if EMPTY with current evidence. If the
+running vacuum's next room is not clear, propose returning to the
+dock. For a docked vacuum, restrict starting in any routine room
+that is not clear. Switch a running washer to low-noise when the
+learned disturbance probability for an occupied room reaches 0.5;
+never stop the cycle. Restore the normal mode only after every
+protected room is EMPTY. \\
+
+Temperature
+& Present residents and their preferred ranges, room temperature,
+AC capabilities; output power, target, airflow
+& Choose the supported setting that minimizes the squared predicted
+thermal-comfort votes of the present residents (ties toward the mean
+preference), direct airflow to the resident preferring the cooler
+setting, and turn the AC off when the room becomes EMPTY. \\
+
+Lighting
+& Confirmed rest, light level, speaker availability, dialogue
+episode; output question or conditional actions
+& Propose one sleep-intent question per rest episode if the room
+has a speaker and the sleep probability reaches 0.3. After a yes
+answer, propose closing the curtain and switching the light off;
+no, ambiguous, or missing answers propose nothing. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{table*}[!t]
+\caption{Scripted Evening Scenario: Residents A and B
+Prefer 24 and 26$^\circ$C}
+\label{tab:scenario}
+\centering
+\small
+\begin{tabularx}{\textwidth}{
+@{}L{0.04\textwidth}L{0.36\textwidth}Y@{}
+}
+\toprule
+\textbf{Step} & \textbf{Observation / event}
+& \textbf{Expected behavior} \\
+\midrule
+t0
+& Washer running; B watches TV in the living room; vacuum cleaning
+Room~2, Room~1 next.
+& Living-room AC on, 26$^\circ$C, airflow toward B. No vacuum
+command (plan kept). \\
+
+t1
+& Room~2 done, vacuum heading to Room~1; A enters bright Room~1 and
+is identified.
+& Route conflict: keep plan vs.\ return to dock; return chosen
+(fallback or LLM) and Room~1 kept as remaining work. Washer
+low-noise; Room~1 AC on toward A (24$^\circ$C). \\
+
+t2
+& Lying and rest evidence persist.
+& One sleep-intent question. Vacuum start held without asking the
+LLM again. \\
+
+t3
+& A answers yes.
+& Close curtain, light off. \\
+
+t4
+& Room dark; identity carried by track; presence continues.
+& Keep occupancy and protection; no repeated question. \\
+
+t5
+& Wake phrase and ``turn on the light''; A sits up.
+& Light on only; curtain unchanged; episode ends. \\
+
+t6
+& A walks to the door; tracking lost while presence remains
+(held); then Room~1 confirmed empty.
+& Hold while occupied; on current EMPTY start Room~1 only, washer
+back to normal, Room~1 AC off. \\
+
+t7
+& A sits next to B in the living room; Room~1 cleaning completes.
+& Living-room AC 25$^\circ$C toward A; no question for sitting;
+routine finished, Room~2 not repeated. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+Per-resident quiet preferences enter the disturbance score; they do
+not relax the occupied-room vacuum rule. Missing identity or
+preferences disable personalization while preserving other actions.
+The prototype does not measure floor contamination; the cleaning
+score estimates cleaning need from history and is shown to the LLM
+as evidence, while the room order comes from the routine.
+
+\subsection{Voice Dialogue and Direct Commands}
+\label{sec:voice}
+
+A confirmed rest transition creates a rest episode for that person.
+The question states are NOT\_ASKED, AWAITING\_REPLY, ANSWERED, and
+EXPIRED. The Node does not report playback completion; the
+Orchestrator therefore sets the reply deadline from the publish
+time as estimated speaking time + listening window + 2\,s + an
+8\,s allowance for a Node that queues the question behind another
+conversation. Replies are accepted only from the Node and room the
+question was sent to. An episode ends when the person rises, is
+currently observed in another room, or disappears while the room is
+no longer occupied; its pending question becomes void.
+Algorithm~\ref{alg:voice} gives the handling.
+
+\begin{algorithm}[!tbp]
+\caption{One-question-per-rest dialogue}
+\label{alg:voice}
+\footnotesize
+\begin{algorithmic}[1]
+\Require episode $E$ with state $Q$, event, current time $t$
+\If{$E$ has ended (rose, moved, or left)}
+  \State Drop $E$; later replies to its request are ignored; \Return
+\EndIf
+\If{$Q=$ NOT\_ASKED and the lighting agent proposes a question}
+  \State Publish text with a new request ID
+  \If{publish accepted}
+    \State Set deadline; $Q\gets$ AWAITING\_REPLY
+  \Else
+    \State Retry at a later snapshot; after 3 refusals $Q\gets$ EXPIRED
+  \EndIf
+  \State \Return
+\EndIf
+\If{$Q\ne$ AWAITING\_REPLY or request ID, Node, or room differ}
+  \State Ignore the event; \Return
+\EndIf
+\If{deadline passed without a reply}
+  \State $Q\gets$ EXPIRED
+\ElsIf{explicit no-response arrives in time}
+  \State answer $\gets$ ambiguous; $Q\gets$ ANSWERED
+\ElsIf{reply arrives in time}
+  \State Interpret text and confidence; $Q\gets$ ANSWERED
+  \If{answer is a clear yes}
+    \State Lighting agent proposes curtain-close and light-off
+  \EndIf
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+A reply counts as yes or no only when it is short and clear and its
+confidence is at least 0.2; questions, mixed words, and fillers are
+ambiguous. Punctuation added by the recognizer is ignored.
+
+A direct command follows the wake phrase in the same or the next
+utterance; the Node matches the phrase in the local transcript and
+sends only the command text. The Orchestrator executes a command only
+if the whole sentence is one supported command for a device in the
+speaking Node's room (light or AC on/off, curtain open/close) and the
+confidence is at least 0.4. Negations, questions, requests for
+instructions, and sentences with several actions are not partly
+executed; the Node asks the resident to repeat. A command is refused
+if the last snapshot is older than 120 seconds. Turning the light on
+does not reopen the curtain. After a published direct command,
+automatic changes to that device are suppressed for 30 minutes.
+
+\subsection{Central Arbitration, Execution, and Trace}
+\label{sec:central}
+
+Algorithm~\ref{alg:central} describes one orchestration cycle. A
+conflict is (a) a vacuum route conflict between the cleaning agent's
+keep-plan intent and the noise agent's return-to-dock proposal, or
+(b) different values proposed for the same device and action. The
+options are exactly the competing proposals (and ``no change'' for a
+value conflict). The LLM receives a compact summary of rooms, people,
+preferences, routines, and agent scores and returns one option ID
+per conflict with a reason; the fallback chooses return-to-dock for a
+route conflict and no change for a value conflict. A choice is reused
+while the same conflict and the related people, preferences,
+routines, and deadline band are unchanged, for at most 15 minutes of
+snapshot time. A docked vacuum whose remaining rooms include a room that is not
+clear is held without consulting the LLM.
+
+\begin{algorithm}[!tbp]
+\caption{Validated orchestration cycle}
+\label{alg:central}
+\footnotesize
+\begin{algorithmic}[1]
+\Require snapshot $S$, history $H$ (pending commands, holds, failures, choices)
+\State $P \gets$ proposals of the four agents on $S$
+\State Drop actions already satisfied, under a manual hold, or awaiting retry
+\State $(A, C, W) \gets$ accepted actions, conflicts, held starts
+\State $C' \gets$ conflicts in $C$ without a reusable choice
+\If{$C' \neq \emptyset$}
+  \State Ask the LLM once for all of $C'$ (outside the lock, bounded time)
+  \State Invalid or missing selection $\Rightarrow$ fallback for $C'$
+\EndIf
+\If{state changed while waiting}
+  \State Recompute $P, A, C$ on the newest state (choices reused)
+\EndIf
+\State $A \gets A \cup$ actions of the chosen options
+\For{each action $a \in A$}
+  \If{validation fails or a matching command is pending}
+    \State Record rejection with reason
+  \ElsIf{automatic control is paused}
+    \State Record PAUSED
+  \Else
+    \State Dispatch with plan and command IDs; mark pending
+  \EndIf
+\EndFor
+\State Publish proposed questions; record the decision ($W$ as held)
+\Statex \textbf{Result handler:}
+\State Match command ID, device, and session; update pending status
+\State On completion of a start, mark its rooms done for the routine
+\State On transient failure, allow a retry after an interval
+\end{algorithmic}
+\end{algorithm}
+
+A ``keep plan'' choice has no device command; other accepted actions
+of the same cycle are still dispatched. When the vacuum is recalled,
+the rooms remaining in its list are kept as the routine's remaining
+work until a matching completion result arrives; rooms the vacuum
+finished on its own (dropped from its list while cleaning) are
+recorded as done. A command must match the device's supported
+action, mode, range, and step; automatic commands cannot bypass an
+active manual override or user restriction. Commands are dispatched
+independently; dependencies between commands are not modeled. A
+command without an accepted or final result within 30 seconds is
+treated as follows: value-setting commands may be re-sent after the
+next state check, while other commands (such as starting cleaning)
+become ``unknown'' and are not re-sent automatically. Commands
+refused by the transport and known transient device failures are
+retried later, a limited number of times, when a subsequent
+snapshot is evaluated. Device results update the pending state but
+do not add a decision record.
+
+\subsection{Simulation, Replay, and Application}
+\label{sec:sim}
+
+The 3D simulation shows rooms, furniture, Node positions, residents,
+and virtual appliances (vacuum route and dock, washer mode, AC
+target and airflow, lights, curtains) together with the messages,
+World Model state, and decisions. Replay uses an explicit scenario
+clock: in replay mode, snapshots with past timestamps are accepted
+and policies use the snapshot time, while the server measures reply
+deadlines and acceptance timeouts in elapsed wall-clock time. Reset clears the Orchestrator's
+snapshot, history, pending commands, holds, and dialogue state;
+registering a new World Model session has the same effect. Decision
+records are kept for inspection, and other modules are reset
+separately.
+
+The application manages homes, rooms, devices, and routines through
+its backend. Entering, storing, and passing per-resident preferences
+to the World Model is planned, and the application is to send
+operator controls (pause, resume, reset) to the Orchestrator's
+control endpoint, which is implemented; the application client is
+pending. The Orchestrator accepts voice input only from Nodes
+registered in the snapshot for the message's room.
+
+\subsection{Non-Functional Behavior and Verification}
+\label{sec:verification}
+
+Each sensor, model, transport, and appliance boundary supports a
+mock with the same logical interface. A missing source preserves
+unknown state; LLM failure is recorded as fallback arbitration. Raw
+media and API credentials are excluded from central messages and
+traces; recognized command text and the context summary sent to the
+LLM (rooms, person identifiers, activities, preferences, scores) are
+derived data and are documented as such.
+
+Decision records use the snapshot time, so latency must be measured
+with separate wall-clock instrumentation; the two-second target is
+not yet measured. Acceptance tests cover the scenario, the vacuum
+route and hold, washer protection, dialogue branches, direct
+commands, overrides, stale and invalid input, publish failures, and
+LLM fallback (Section~\ref{sec:impl-test}).
+
+\subsection{Primary Validation Scenario}
+\label{sec:scenario}
+
+Table~\ref{tab:scenario} summarizes the evening scenario used for the
+demonstration. At t0 the vacuum is already cleaning Room~2 as part
+of the evening routine, with Room~1 next; after Room~2 is finished
+its remaining list is Room~1 only, and t1 happens before it enters
+Room~1. Resident A is played by a team member enrolled on the
+physical Node.
+
+Only Room~1 uses the physical Node; other rooms are simulated.
+Negative, ambiguous, and no-response branches leave lighting
+unchanged.
+
+\section{Architecture Design and Implementation}
+\label{sec:arch}
+
+\subsection{Overall Architecture}
+
+Figure~\ref{fig:arch} shows the modules, their main classes, and the
+relationships between them. Each box is one repository; the edge
+labels give the transport and messages. The line style shows the
+integration status on the current revisions.
+
+\begin{figure*}[!t]
+\centering
+\begin{tikzpicture}[
+mod/.style={draw,rounded corners,align=left,text width=44mm,
+  font=\scriptsize,inner sep=4pt},
+hub/.style={draw,rounded corners=10pt,align=center,text width=24mm,
+  font=\scriptsize,inner sep=4pt,fill=gray!10},
+ok/.style={-{Stealth},thick},
+todo/.style={-{Stealth},thick,dashed},
+tbd/.style={-{Stealth},thick,dotted},
+lab/.style={font=\tiny,fill=white,inner sep=1pt,align=center}
+]
+\node[mod] (node) at (0,0) {\textbf{Node} (\fld{eyear-node}, Shin)\\
+Room perception and voice I/O on a laptop with two radars.\\
+\fld{VisionPipeline}, \fld{FaceIdentifier}, \fld{PoseEstimator},
+\fld{ClipRestScorer}, \fld{ActivityJudge}, \fld{RadarInput},
+\fld{SingleRoomFusion}, \fld{EventBuilder}, \fld{VoiceSession},
+\fld{SpeechRecognizer}, \fld{TextWakeWord}, \fld{MqttSink},
+\fld{NodeStatusPublisher}};
+
+\node[hub] (broker) at (6.3,0) {\textbf{MQTT broker}\\Mosquitto on the Node laptop, port 1883};
+
+\node[mod] (wm) at (12.4,2.7) {\textbf{World Model} (\fld{eyear-worldmodel}, Lee)\\
+Multi-Node fusion into WorldSnapshot 2.0.\\
+\fld{NodeHub}, \fld{WorldEngine}, \fld{HomeConfig},
+\fld{NodeStateMessage}, contract models, \fld{SnapshotReceiver}};
+
+\node[mod] (orc) at (12.4,-2.0) {\textbf{Orchestrator} (\fld{eyear-orchestrator}, Song)\\
+Agents, arbitration, validation, dialogue, dispatch.\\
+\fld{Orchestrator}, agent functions, \fld{Models}, \fld{History},
+\fld{DialogueManager}, \fld{LlmArbiter}, \fld{MqttBridge},
+\fld{WorldSnapshot}, \fld{Decision}};
+
+\node[mod] (sim) at (6.3,-3.6) {\textbf{3D simulation} (\fld{eyear-worldmodel/sim}, Lee)\\
+Three.js home, virtual appliances, scenario player.\\
+\fld{demo3d.js}, \fld{view3d.js}, \fld{devices.js}, \fld{scenario.js}};
+
+\node[mod] (app) at (12.4,-5.6) {\textbf{Application} (\fld{eyear-app}, Joung)\\
+Expo mobile app and Spring Boot backend.\\
+\fld{DeviceController}, \fld{RoutineController}, \fld{DeviceService},
+\fld{RoutineScheduler}, \fld{DeviceSimulator}};
+
+% Node <-> broker
+\draw[ok] ([yshift=2.5mm]node.east) -- node[lab,above] {state, status,\\voice reply/command} ([yshift=2.5mm]broker.west);
+\draw[ok] ([yshift=-2.5mm]broker.west) -- node[lab,below] {speak} ([yshift=-2.5mm]node.east);
+% broker -> World Model
+\draw[todo] (broker.north) |- node[lab,pos=0.75,above] {room state, device state and result} (wm.west);
+% Orchestrator <-> broker
+\draw[ok] ([yshift=-2.5mm]broker.east) -| node[lab,pos=0.25,below] {voice reply/command} ([xshift=-20mm]orc.north);
+\draw[ok] ([xshift=-14mm]orc.north) |- node[lab,pos=0.75,above] {speak, device command} ([yshift=2.5mm]broker.east);
+% World Model -> Orchestrator
+\draw[todo] (wm.south) -- node[lab,right] {HTTP: snapshots,\\device results} ([xshift=6mm]orc.north);
+% simulation <-> broker
+\draw[todo] ([xshift=3mm]sim.north) -- node[lab,right] {device state\\and result} ([xshift=3mm]broker.south);
+\draw[todo] ([xshift=-3mm]broker.south) -- node[lab,left] {command} ([xshift=-3mm]sim.north);
+% application -> Orchestrator and World Model
+\draw[todo] (app.north) -- node[lab,right] {HTTP control} (orc.south);
+\draw[tbd] (app.east) -- ++(5mm,0) |- node[lab,pos=0.4,left] {preferences} (wm.east);
+\end{tikzpicture}
+\caption{Overall architecture. Boxes are repositories with their main
+classes; edges are directed message flows. Solid: implemented on both
+sides (not yet run end to end with the physical Node). Dashed: the
+interface is defined but the connection is not yet complete (World
+Model transport, simulator broker connection, app control client;
+see Table~\ref{tab:integration}). Dotted: transport not decided.}
+\label{fig:arch}
+\end{figure*}
+
+Inside the Orchestrator, a snapshot passes through the contract
+models, the four agents, conflict detection and arbitration, the
+validator, and dispatch (Fig.~\ref{fig:orch}).
+
+\begin{figure}[!tbp]
+\centering
+\begin{tikzpicture}[
+st/.style={draw,rounded corners,align=center,text width=58mm,
+  font=\scriptsize,inner sep=3pt},
+ar/.style={-{Stealth},thick},
+node distance=3.5mm
+]
+\node[st] (a) {\fld{server.py}: HTTP snapshot input, session check};
+\node[st,below=of a] (b) {\fld{contract.py}: \fld{WorldSnapshot} validation};
+\node[st,below=of b] (c) {\fld{agents.py}: cleaning, noise, temperature, lighting\\(\fld{features.py}, \fld{Models})};
+\node[st,below=of c] (d) {\fld{central.py}: merge, \fld{find_conflicts},\\cached choice / \fld{LlmArbiter} / \fld{fallback_choice}};
+\node[st,below=of d] (e) {\fld{central.py}: \fld{validate}, duplicates, pause};
+\node[st,below=of e] (f) {dispatch: device command, speech (\fld{voice.py});\\\fld{Decision} record};
+\draw[ar] (a) -- (b); \draw[ar] (b) -- (c); \draw[ar] (c) -- (d);
+\draw[ar] (d) -- (e); \draw[ar] (e) -- (f);
+\end{tikzpicture}
+\caption{Processing inside the Orchestrator for one snapshot.}
+\label{fig:orch}
+\end{figure}
+
+\subsection{Directory Organization}
+
+Table~\ref{tab:dirs} lists the source directories of each repository
+and the module that uses them.
+
+\begin{table*}[!t]
+\caption{Directory Organization (Main Branch Revisions Cited in Section~\ref{sec:impl})}
+\label{tab:dirs}
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{0.24\textwidth}L{0.32\textwidth}L{0.12\textwidth}Y@{}}
+\toprule
+\textbf{Directory} & \textbf{Main files} & \textbf{Module} & \textbf{Purpose} \\
+\midrule
+\brk{eyear-node/vision} & \brk{pipeline.py}, \brk{face_id.py}, \brk{pose.py}, \brk{clip.py}, \brk{activity.py}, \brk{tracker.py}, \brk{continuity.py}, \brk{light.py} & Node & Camera perception \\
+\brk{eyear-node/audio} & \brk{voice_session.py}, \brk{stt.py}, \brk{vad.py}, \brk{tts.py}, \brk{wakeword.py}, \brk{classifier.py}, \brk{mic.py} & Node & Voice I/O, acoustic context \\
+\brk{eyear-node/radar} & \brk{ld2450.py}, \brk{ld2410c.py}, \brk{source.py}, \brk{config.py} & Node & Radar protocols and serial input \\
+\brk{eyear-node/fusion} & \brk{fuse.py}, \brk{radar_input.py}, \brk{room_state.py}, \brk{events.py} & Node & Camera--radar fusion, messages \\
+\brk{eyear-node/publisher}, \brk{schema} & \brk{sinks.py}, \brk{topics.py}, \brk{fake_sender.py}, \brk{fake_voice.py}; \brk{models.py}, \brk{json/} & Node & MQTT output, simulated Nodes, message schema \\
+\midrule
+\brk{eyear-worldmodel/worldmodel} & \brk{engine.py}, \brk{hub.py}, \brk{node_input.py}, \brk{config.py} & World Model & State fusion and snapshot \\
+\brk{eyear-worldmodel/worldmodel/contract} & \brk{models.py}, \brk{semantic.py}, \brk{receiver.py}, \brk{json/} & World Model & WorldSnapshot 2.0 schema and reference receiver \\
+\brk{eyear-worldmodel/sim} & \brk{demo3d.html}, \brk{js/demo3d.js}, \brk{view3d.js}, \brk{devices.js}, \brk{scenario.js}, \brk{worldmodel.js}, \brk{mock_orchestrator.js} & Simulation & 3D home and virtual appliances \\
+\midrule
+\brk{eyear-orchestrator/orchestrator} & \brk{contract.py}, \brk{schemas.py}, \brk{features.py}, \brk{agents.py}, \brk{central.py}, \brk{voice.py}, \brk{llm.py}, \brk{server.py}, \brk{config.py} & Orchestrator & Agents, arbitration, service \\
+\brk{eyear-orchestrator/orchestrator} & \brk{fixtures.py}, \brk{demo.py} & Orchestrator & Scenario fixture and standalone demo \\
+\brk{eyear-orchestrator/dataset}, \brk{models} & \brk{simulate.py}, \brk{train.py}; four \brk{.joblib} files, \brk{model_card.json} & Orchestrator & Training data simulator, trained models \\
+\brk{eyear-orchestrator/tests}, \brk{examples}, \brk{docs} & \brk{test_orchestrator.py}, \brk{test_server.py}; snapshots and decisions; \brk{simulator-alignment.md} & Orchestrator & Tests, examples, integration notes \\
+\midrule
+\brk{eyear-app/app/src} & \brk{app/(tabs)}, \brk{app/devices}, \brk{app/routines}, \brk{components}, \brk{lib} & Application & Expo screens and API client \\
+\brk{eyear-app/backend/src} & controllers, services (\brk{DeviceService}, \brk{RoutineScheduler}, \brk{DeviceSimulator}), entities & Application & Spring Boot backend \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsection{Implementation Status}
+\label{sec:impl}
+
+The descriptions refer to the main branches at Node \fld{7c371dc},
+World Model \fld{973ceb0}, Orchestrator \fld{0ecf7bd}, and
+application \fld{f5cf631}. Table~\ref{tab:integration} gives the
+status of each connection.
+
+\begin{table*}[!t]
+\caption{Connection Status}
+\label{tab:integration}
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{0.24\textwidth}L{0.24\textwidth}Y@{}}
+\toprule
+\textbf{Flow} & \textbf{Transport} & \textbf{Status} \\
+\midrule
+Room state, Node status: Node $\to$ World Model & MQTT & Node publishes 0.2; the World Model parser accepts 0.1 and 0.2 (unit test; the Node owner also replayed recorded Node messages through it); the MQTT subscriber is pending. \\
+Snapshot: World Model $\to$ Orchestrator & HTTP & Orchestrator endpoint and session registration implemented; the World Model engine output passes the Orchestrator contract; the HTTP sender is pending. \\
+Speech: Orchestrator $\to$ Node & MQTT & Implemented on both sides; formats compatible; end-to-end run pending. \\
+Reply, command: Node $\to$ Orchestrator & MQTT & Implemented on both sides; Node 0.2 examples accepted by the Orchestrator parser; end-to-end run pending. \\
+Device command: Orchestrator $\to$ simulation & MQTT & Orchestrator publishes; the browser simulation currently uses an internal bus with a mock decision module. \\
+Device state: simulation $\to$ World Model & MQTT & World Model engine accepts device states (\fld{upsert_device}); broker connection on both sides pending. \\
+Device result: simulation $\to$ World Model $\to$ Orchestrator & MQTT, HTTP & Orchestrator endpoint implemented; World Model engine accepts results; MQTT input and HTTP forwarding pending. \\
+Preferences: application $\to$ World Model & not decided & World Model accepts profiles and routines through its engine API. \\
+Controls: application $\to$ Orchestrator & HTTP & Orchestrator endpoint implemented; application client pending. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\subsection{Module 1: EYEAR Node}
+
+\textbf{Purpose.} Turns camera, microphone, and radar input in one
+room into semantic room state messages, and plays and listens for
+speech. \textbf{Location:} \fld{eyear-node}; entry point \fld{main.py}.
+
+\textbf{Vision.} \fld{VisionPipeline} runs \fld{PoseEstimator}
+(MediaPipe pose landmarks to posture), \fld{FaceIdentifier}
+(InsightFace \fld{buffalo_l}, cosine threshold 0.40, enrolled
+faces), \fld{CameraTracker}, \fld{ClipRestScorer} (MobileCLIP2-S2
+image--text rest probability), and \fld{ActivityJudge} (RESTING
+after lying and rest agreement for 5\,s). \fld{SinglePersonContinuity}
+keeps the last camera state for a few seconds when the single
+occupant is briefly not visible.
+
+\textbf{Radar and fusion.} \fld{Ld2450StreamParser} and
+\fld{Ld2410StreamParser} decode the UART frames (256000 baud for the
+LD2450 through a CP2102 adapter, 270000 baud configured for the
+LD2410C through its CH340 adapter);
+\fld{SerialSource} reads the ports; \fld{RadarInput} converts targets
+to the room frame with a 3.75\,m range limit. \fld{SingleRoomFusion}
+associates camera and radar tracks, applies the occupancy rules of
+Algorithm~\ref{alg:node}, and carries the earlier identity of the
+single occupant in the dark (TRACK\_CARRIED); \fld{RoomState} and \fld{EventBuilder}
+build version 0.2 messages with changes and one-second heartbeats.
+
+\textbf{Audio and voice.} \fld{MicStream} captures 16\,kHz audio;
+\fld{SpeechSegmenter} (WebRTC VAD) cuts speech segments;
+\fld{SpeechRecognizer} transcribes them with faster-whisper
+\fld{small}; \fld{TextWakeWord} finds the wake phrase in the
+transcript; \fld{Speaker} uses the macOS voice; \fld{VoiceSession}
+manages idle, command, and reply-listening states; \fld{YamnetModel}
+and \fld{ContextVoter} produce audio context labels.
+
+\textbf{Output and testing.} \fld{MqttSink} publishes messages and
+\fld{NodeStatusPublisher} publishes the retained online status with
+a last-will message. \fld{ScenarioPlayer} (\fld{fake_sender.py})
+replays the scenario for simulated rooms, and \fld{VoiceResponder}
+sends scripted replies to speech requests so that the Orchestrator can
+be tested without a microphone. Unit tests cover activity,
+audio, continuity, fusion, radar, room state, schema, vision, and the
+voice session.
+
+\subsection{Module 2: World Model and 3D Simulation}
+
+\textbf{Purpose.} Combines messages from all Nodes and device states
+into one versioned home state, and visualizes the home.
+\textbf{Location:} \fld{eyear-worldmodel}.
+
+\textbf{World Model.} \fld{NodeHub} queues messages per Node and
+feeds \fld{WorldEngine}, which keeps Node, person, device, and
+measurement records with time-to-live values, maps Node identities
+to persons through \fld{HomeConfig}, holds a person in a room while
+the room stays occupied (HELD), and produces a WorldSnapshot 2.0
+through \fld{snapshot()}; \fld{poll()} decides when to publish
+(changes immediately, at most once per second for value changes,
+and keep-alive otherwise). Profiles, routines, and restrictions are
+set through \fld{set_profiles}, \fld{set_routines}, and
+\fld{set_restrictions}. The \fld{contract} package defines the
+snapshot schema with semantic checks and a reference receiver.
+Unit tests cover the contract, engine, hub, and receiver. Remaining
+work: MQTT input and HTTP output, use of the boot identifier and
+status topic, and ordering of late observations across Nodes.
+
+\textbf{Simulation.} \fld{demo3d.html} renders the floor plan,
+residents, Node sensor ranges, and virtual appliances with Three.js
+and plays the scenario steps. The current browser build contains its
+own simplified World Model and a mock decision module; connecting it
+to the Python World Model and the Orchestrator requires the command
+and result formats in \brk{docs/simulator-alignment.md} of the
+Orchestrator repository.
+
+\subsection{Module 3: Agents and Home Orchestrator}
+
+\textbf{Purpose.} Turns each snapshot into validated appliance
+commands and Node speech, and records why.
+\textbf{Location:} \brk{eyear-orchestrator/orchestrator}.
+
+\textbf{Contract and messages.} \fld{contract.py} defines
+\fld{WorldSnapshot} and its parts (\fld{Room}, \fld{Person},
+\fld{Device} with kind-specific state, \fld{Capabilities},
+\fld{Profile}, \fld{Routine}, \fld{UserRestriction}) as Pydantic
+models that reject unknown fields and check references and
+consistency. \fld{schemas.py} defines \fld{AgentProposal}
+(\fld{ProposedAction}, \fld{Restriction}, \fld{KeepPlan},
+\fld{Question}), \fld{Conflict}, \fld{Option}, \fld{LlmSelection},
+\fld{DeviceCommand}, \fld{DeviceResult}, the voice messages, and
+\fld{Decision}.
+
+\textbf{Agents.} \fld{agents.py} implements \fld{cleaning_agent},
+\fld{noise_agent}, \fld{temperature_agent}, and
+\fld{lighting_agent} with the policies of Table~\ref{tab:policies}.
+\fld{features.py} computes the same features at run time and in
+training and keeps \fld{History} (cleaning times, completed and
+remaining rooms per routine occurrence). \fld{Models} loads the
+trained models and falls back to rules if a file is missing, broken,
+or trained with a different feature order.
+
+\textbf{Central decision.} \fld{central.py} contains
+\fld{Orchestrator} with \fld{on_snapshot}, \fld{on_voice_reply},
+\fld{on_voice_command}, \fld{on_device_result}, \fld{control}, and
+\fld{decide} (Algorithm~\ref{alg:central}); \fld{find_conflicts}
+builds route and value conflicts; \fld{validate} checks actions;
+\fld{fallback_choice} gives the deterministic selection. The LLM is
+called outside the lock; if a snapshot, direct command, reply, or
+control arrives meanwhile, the plan is recomputed, and a reset or
+session change discards it. \fld{voice.py} contains
+\fld{DialogueManager} and \fld{Episode} (Algorithm~\ref{alg:voice}),
+\fld{interpret_reply}, and \fld{parse_command}.
+
+\textbf{LLM interface.} \fld{LlmArbiter} (\fld{llm.py}) calls the
+OpenAI API with structured output (\fld{LlmSelection}), model
+\fld{gpt-6-luna}, low reasoning effort, an 8\,s timeout, and no
+automatic retry. A selection is used only if it names exactly the
+given conflicts and options.
+
+\textbf{Service.} \fld{server.py} provides FastAPI endpoints:
+\fld{POST /v2/world/sessions}, \fld{/v2/world/snapshots} (202, or
+409/422 for unregistered sessions, old revisions, or invalid input),
+\brk{/v2/world/device-results}, \fld{/v1/control}, test inputs
+\fld{/v1/voice/reply} and \fld{/v1/voice/command}, and
+\fld{GET /v1/decisions}, \fld{/v1/status}, \fld{/v1/speech},
+\fld{/v1/schemas}. \fld{MqttBridge} subscribes to the voice topics
+with QoS 1, validates and queues messages, and handles replies and
+direct commands in two worker threads, so a direct command is not
+delayed while a reply waits for the LLM. It publishes speech and
+device commands and reports refused publishes.
+
+\textbf{Learned scoring.} \fld{dataset/simulate.py} generates 16
+synthetic households over 14 days from hidden states;
+\fld{dataset/train.py} trains on households 0--11 and evaluates on
+12--15 (Table~\ref{tab:models}). The labels are synthetic, so the
+figures show agreement with the simulator, not real-home accuracy.
+The model kind per agent is fixed in the script; for lighting,
+gradient boosting reached a slightly higher AUC (0.821), and the
+simpler logistic model is kept.
+
+\begin{table}[!tbp]
+\caption{Learned Models on Held-Out Synthetic Households}
+\label{tab:models}
+\centering
+\footnotesize
+\begin{tabularx}{\columnwidth}{@{}L{0.17\columnwidth}L{0.24\columnwidth}Y@{}}
+\toprule
+\textbf{Agent} & \textbf{Model (target)} & \textbf{Rule vs.\ model} \\
+\midrule
+Cleaning & Gradient boosting regression (synthetic dirt level) & MAE 0.311 vs.\ 0.063 \\
+Noise & Logistic regression (disturbance) & AUC 0.779 vs.\ 0.830 \\
+Temperature & Ridge regression (comfort vote) & MAE 0.676 vs.\ 0.326 \\
+Lighting & Logistic regression (sleep intent) & AUC 0.655 vs.\ 0.794 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Module 4: Application}
+
+\textbf{Purpose.} User-facing ThinQ-style interface.
+\textbf{Location:} \fld{eyear-app}. The Expo client (\fld{app/src})
+provides login, home, device list and detail, device registration,
+routines, diagnosis, and notification screens. The Spring Boot
+backend (\fld{backend/src}) provides REST controllers for
+authentication (including social login), homes, devices, routines,
+and notifications; services for device commands, routine scheduling,
+energy, and a \fld{DeviceSimulator}; and JPA entities persisted in
+PostgreSQL. Integration with the World Model (preferences) and the
+Orchestrator (controls) is pending.
+
+\begin{figure*}[!t]
+\centering
+\scriptsize
+\begin{verbatim}
+[t0] rev 101 snapshot    cmd  ac_living.set_power {power: on}
+                         cmd  ac_living.set_target_temperature {target_c: 26.0}
+                         cmd  ac_living.set_airflow_target {person_id: person_b}
+[t1] rev 105 snapshot    cmd  washer_01.set_mode {mode: low_noise}
+                         cmd  ac_room1.set_power {power: on}
+                         cmd  ac_room1.set_airflow_target {person_id: person_a}
+                         cmd  vacuum_01.return_to_dock {}
+                         conflict vacuum_01:route  next room1 ROOM_OCCUPIED  keep_plan vs return_to_dock
+                                  -> return_to_dock [fallback] FALLBACK_AVOID_OCCUPIED_ROOM
+[t2] rev 110 snapshot    speak room1 sleep question (expect_reply)
+                         held vacuum_01.start_cleaning [room1]: WAIT_UNTIL_EMPTY:room1(ROOM_OCCUPIED_RESTING)
+[t2] voice_reply:yes     cmd  light_room1.set_power {power: off}
+                         cmd  curtain_room1.set_curtain_position {position_pct: 0}
+[t3], [t4]               held vacuum_01.start_cleaning [room1]: WAIT_UNTIL_EMPTY (no question repeated)
+[t5] voice_command       cmd  light_room1.set_power {power: on}     speak room1 acknowledgement
+[t5] rev 116 snapshot    held vacuum_01.start_cleaning [room1]: WAIT_UNTIL_EMPTY:room1(ROOM_OCCUPIED)
+[t6] rev 117 snapshot    cmd  vacuum_01.start_cleaning {room_ids: [room1], mode: normal}
+                         cmd  washer_01.set_mode {mode: normal}
+                         cmd  ac_room1.set_power {power: off}
+[t7] rev 121 snapshot    cmd  ac_living.set_target_temperature {target_c: 25.0}
+                         cmd  ac_living.set_airflow_target {person_id: person_a}
+\end{verbatim}
+\caption{Standalone scenario run of the Orchestrator (revision
+\fld{0ecf7bd}, deterministic fallback, simulated appliances). The
+console labels and spoken sentences are Korean in the program and are
+translated and abridged here.}
+\label{fig:trace}
+\end{figure*}
+
+\subsection{Testing}
+\label{sec:impl-test}
+
+The Orchestrator has 101 automated tests (\fld{pytest}), all passing
+on revision \fld{0ecf7bd}: 95 for contract validation, agents,
+conflicts, LLM selection and fallback, dialogue, direct commands,
+pending commands, retries, the MQTT workers, and the full scenario,
+and 6 for the HTTP service. The scenario test replays t0--t7 and
+checks the key commands of each step and the absence of forbidden
+ones (for example, no vacuum start while Room~1 is occupied). The
+Node has unit tests in its repository; the World Model's 96 unit
+tests pass on revision \fld{973ceb0} (re-run for this document). Tests with the physical Node, the broker, the
+World Model transport, and the 3D simulation together are pending.
+
+\section{Use Cases}
+\label{sec:uc}
+
+Each use case lists the requirements it demonstrates, its steps, and
+the evidence available now. Unless stated otherwise, evidence comes
+from the Orchestrator's standalone scenario run (\fld{python -m
+orchestrator.demo}), which replays the scenario snapshots with
+simulated appliances and the deterministic fallback, and from the
+automated tests. Figure~\ref{fig:trace} shows the run. Screenshots
+of the 3D simulation, the physical Node, and the decision interface
+will be added after integration.
+
+\begin{table*}[!t]
+\caption{Automated Orchestrator Tests Supporting Each Use Case (revision \textnormal{\texttt{0ecf7bd}}, all passing)}
+\label{tab:uctests}
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{0.06\textwidth}Y@{}}
+\toprule
+\textbf{Case} & \textbf{Tests (\fld{tests/test_orchestrator.py}, \fld{tests/test_server.py})} \\
+\midrule
+UC1 & \brk{test_scenario_matches_demo}, \brk{test_llm_return_choice_is_used_once_and_kept}, \brk{test_llm_keep_plan_sends_no_vacuum_command}, \brk{test_invalid_llm_choice_falls_back}, \brk{test_hold_is_kept_without_asking_llm_while_room1_is_not_confirmed_empty}, \brk{test_return_is_not_asked_again_before_vacuum_state_updates}, \brk{test_room1_only_restarts_and_room2_is_never_added_even_after_failed_publish} \\
+UC2 & \brk{test_scenario_matches_demo} (t1 low-noise, t6 normal) \\
+UC3 & \brk{test_no_or_missing_reply_keeps_lights}, \brk{test_interpret_reply}, \brk{test_reply_interpretation_is_strict}, \brk{test_reply_from_other_room_or_node_is_ignored}, \brk{test_question_is_void_after_person_is_seen_in_another_room}, \brk{test_late_reply_within_queue_allowance_is_accepted} \\
+UC4 & \brk{test_only_whole_single_commands_are_executed}, \brk{test_negated_or_question_commands_are_not_parsed}, \brk{test_low_confidence_and_duplicate_commands_are_not_executed}, \brk{test_voice_command_from_unregistered_node_is_ignored_but_works_while_paused}, \brk{test_direct_command_is_refused_when_state_is_old} \\
+UC5 & \brk{test_scenario_matches_demo} (t0, t1, t6, t7) \\
+UC6 & \brk{test_paused_orchestrator_sends_nothing}, \brk{test_pause_during_llm_wait_blocks_plan_and_resume_decides_immediately}, \brk{test_reset_during_llm_wait_discards_the_plan}, \brk{test_decision_is_recorded_and_question_asked} \\
+UC7 & \brk{test_invalid_snapshot_is_422}, \brk{test_unregistered_session_is_409}, \brk{test_accept_duplicate_conflict_and_old_revision}, \brk{test_contract_semantic_checks}, \brk{test_stale_device_state_is_not_commanded}, \brk{test_validator_rejects_unsupported_and_out_of_range}, \brk{test_mqtt_bridge_queues_messages_and_checks_topic_room_and_fields} \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{table*}[!t]
+\caption{Requirement-to-Specification and Evidence Mapping}
+\label{tab:trace}
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{
+@{}L{0.09\textwidth}L{0.17\textwidth}Y@{}
+}
+\toprule
+\textbf{Requirement} & \textbf{Specification}
+& \textbf{Evidence now (scope)} \\
+\midrule
+R-01 & Secs.~\ref{sec:agents}, \ref{sec:central}; UC1
+& Orchestrator scenario and tests with fallback; live LLM choice and
+3D route pending. \\
+R-02 & Secs.~\ref{sec:agents}, \ref{sec:voice}; UC2, UC3
+& Orchestrator scenario and dialogue tests; Node voice tests. \\
+R-03 & Secs.~\ref{sec:central}, \ref{sec:sim}; UC4, UC6
+& Orchestrator control and trace tests; app control client pending. \\
+R-04--R-10 & Sec.~\ref{sec:node}; Module 1
+& Node implementation and unit tests; physical Node in Room~1. \\
+R-11 & Sec.~\ref{sec:flow}
+& Node 0.2 schema and examples; World Model parser test, plus a replay of recorded Node messages reported by the Node owner. \\
+R-12 & Sec.~\ref{sec:world}; Module 2
+& Per-Node ordering in the World Model; ordering of late observations across Nodes pending. \\
+R-13--R-14 & Secs.~\ref{sec:flow}, \ref{sec:world}; UC7
+& WorldSnapshot 2.0 contract validated on both sides. \\
+R-15--R-17 & Secs.~\ref{sec:agents}, \ref{sec:central}; UC1--UC5
+& Orchestrator tests, including invalid LLM selection and fallback. \\
+R-18--R-19 & Secs.~\ref{sec:world}, \ref{sec:central}; UC6
+& Decision key and records tested; device results correlate with commands but do not add records. \\
+R-20 & Module 3, Table~\ref{tab:models}
+& Four trained models with rule fallback; synthetic evaluation only. \\
+R-21--R-23 & Sec.~\ref{sec:sim}; Module 2
+& 3D simulation implemented with a mock decision module; replay clock in the Orchestrator; multi-stream replay conditional. \\
+R-24 & Sec.~\ref{sec:verification}
+& Mocks and fallback tested. \\
+R-25 & Sec.~\ref{sec:verification}
+& Not yet measured. \\
+R-26 & Sec.~\ref{sec:verification}; UC7
+& Input rejection and registered-Node checks tested; service authentication not implemented. \\
+R-27 & Sec.~\ref{sec:voice}; UC3, UC4
+& Formats compatible on both sides; end-to-end run with the physical Node pending. \\
+R-28 & Sec.~\ref{sec:sim}; Module 4
+& App and backend implemented; preference and control integration pending. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+% Screenshots: uncomment after the team provides the images (upload them to figs/).
+% \begin{figure*}[!t]
+% \centering
+% \begin{tabular}{@{}c@{\hspace{0.02\textwidth}}c@{\hspace{0.02\textwidth}}c@{}}
+% \shot{figs/uc1_vacuum.png}{0.31\textwidth}{UC1: 3D simulation at t1, vacuum returning to the dock} &
+% \shot{figs/uc3_node_voice.png}{0.31\textwidth}{UC3: Node console, question played and reply recognized} &
+% \shot{figs/uc6_decisions.png}{0.31\textwidth}{UC6: decision record from GET /v1/decisions} \\
+% (a) Use Case 1 & (b) Use Case 3 & (c) Use Case 6
+% \end{tabular}
+% \caption{Screenshots of the use cases.}
+% \label{fig:shots}
+% \end{figure*}
+
+\subsection{Use Case 1: Vacuum Returns and Resumes the Held Room}
+
+\textbf{Requirements:} R-01, R-15, R-16, R-17, R-19.
+\textbf{Steps:} (1) The vacuum cleans Room~2 with Room~1 next.
+(2) Room~2 finishes; the remaining list becomes Room~1. (3) A enters
+Room~1 before the vacuum does. (4) The cleaning agent proposes
+keeping the plan; the noise agent proposes returning to the dock.
+(5) The LLM, or the fallback, chooses; with ``return'' the vacuum is
+sent to the dock once and Room~1 is kept. (6) While Room~1 is
+occupied or unknown, the start is held without asking the LLM.
+(7) When Room~1 is reported empty with current evidence, only Room~1
+is started; after its completion result the routine is finished.
+\textbf{Run:} \fld{python -m orchestrator.demo} (fallback) or with
+\texttt{-{}-llm}; check the t1 conflict, the held starts, and the t6
+command.
+\textbf{Evidence:} Fig.~\ref{fig:trace} (t1, t2--t5, t6, t7) and the
+tests in Table~\ref{tab:uctests}, including a refused start whose
+retry still contains only Room~1, the ``keep plan'' branch, and an
+invalid LLM selection. The live LLM choice at t1 is to be rehearsed
+separately.
+
+\subsection{Use Case 2: Quiet Coordination of the Washer}
+
+\textbf{Requirements:} R-02, R-15, R-17.
+\textbf{Steps:} (1) The washer runs in normal mode. (2) A enters
+Room~1, which the laundry room influences. (3) The noise agent's
+disturbance probability passes the threshold and it proposes the
+low-noise mode; the cycle is not stopped. (4) When Room~1 becomes
+empty, the normal mode is restored.
+\textbf{Run:} \fld{python -m orchestrator.demo}; check the washer
+commands at t1 and t6.
+\textbf{Evidence:} Fig.~\ref{fig:trace} (t1, t6); Table~\ref{tab:uctests}.
+
+\subsection{Use Case 3: Sleep Question and Answer}
+
+\textbf{Requirements:} R-02, R-14, R-27.
+\textbf{Steps:} (1) The World Model reports A as resting with
+confirmation. (2) The lighting agent proposes a question and the
+Orchestrator publishes it to the Room~1 Node with a request ID.
+(3) The Node plays it, listens, and returns the transcript.
+(4) A clear ``yes'' closes the curtain and turns the light off; ``no'',
+an ambiguous reply, or no response changes nothing. (5) Later
+snapshots of the same rest episode do not repeat the question.
+\textbf{Run:} \fld{python -m orchestrator.demo}, and again with
+\texttt{-{}-reply none}; compare the light and curtain commands after t2.
+\textbf{Evidence:} Fig.~\ref{fig:trace} (t2, t3--t4);
+Table~\ref{tab:uctests}. On the Node side, the voice session (wake
+phrase, command, and reply listening) is covered by
+\fld{tests/test_voice_session.py} in \fld{eyear-node}.
+
+\subsection{Use Case 4: Direct Voice Command}
+
+\textbf{Requirements:} R-03, R-17, R-27.
+\textbf{Steps:} (1) A says the wake phrase and ``turn on the light''.
+(2) The Node sends the command text. (3) The Orchestrator checks the
+Node, the confidence, and the sentence, and turns on the Room~1
+light; the curtain stays closed. (4) The Node speaks an
+acknowledgement. (5) Automatic changes to the light are suppressed
+for 30 minutes. Negated, questioning, or multi-action sentences are
+not executed and the Node asks again.
+\textbf{Run:} \fld{python -m orchestrator.demo}; check the t5
+voice command: only the light is switched on.
+\textbf{Evidence:} Fig.~\ref{fig:trace} (t5); Table~\ref{tab:uctests}.
+
+\subsection{Use Case 5: Preference-Based Air Conditioning}
+
+\textbf{Requirements:} R-15, R-13.
+\textbf{Steps:} (1) B alone in the living room (26$^\circ$C preferred):
+target 26$^\circ$C toward B. (2) A joins (24$^\circ$C preferred): target
+25$^\circ$C, airflow toward A, who prefers the cooler setting. (3) A
+alone in Room~1: the Room~1 AC is switched on with airflow toward A;
+its target is already 24$^\circ$C in the scenario, so no new target
+command is needed. The AC is switched off when Room~1 is empty.
+\textbf{Run:} \fld{python -m orchestrator.demo}; check the AC
+commands at t0, t1, t6, and t7.
+\textbf{Evidence:} Fig.~\ref{fig:trace} (t0, t1, t6, t7); Table~\ref{tab:uctests}.
+
+\subsection{Use Case 6: Operator Control and Decision Trace}
+
+\textbf{Requirements:} R-03, R-19, R-24.
+\textbf{Steps:} (1) The operator sends \fld{pause} to
+\fld{/v1/control}; automatic commands are recorded as PAUSED while
+direct commands still run. (2) \fld{resume} decides again at once if
+the last snapshot is recent. (3) \fld{reset} clears the central state.
+(4) \fld{GET /v1/decisions} returns each decision with proposals,
+conflicts, choices, arbitration mode, commands, and rejections.
+\textbf{Run:} start \fld{python -m orchestrator.server}; register
+the session by sending only the \fld{home_id}, \fld{world_session_id},
+and \fld{clock_mode} of \fld{examples/scenario/snapshot_t0.json} to
+\fld{POST /v2/world/sessions} (201); send \fld{{"action": "pause"}}
+to \fld{POST /v1/control} (200); post the snapshot to
+\fld{POST /v2/world/snapshots} (202); \fld{GET /v1/decisions} then
+shows no commands and three actions rejected with reason PAUSED.
+\textbf{Evidence:} Table~\ref{tab:uctests}; example records in
+\fld{examples/scenario/}.
+
+\subsection{Use Case 7: Invalid and Uncertain Input}
+
+\textbf{Requirements:} R-12, R-13, R-24, R-26.
+\textbf{Steps:} (1) A snapshot with an unknown field, a missing
+reference, or a person in an empty room is rejected (422). (2) An
+unregistered session or an older revision is refused (409). (3) A
+device with outdated state is not commanded. (4) An unsupported
+action or out-of-range temperature is rejected. (5) Voice messages
+from an unregistered Node, from the wrong room, or duplicated are
+ignored.
+\textbf{Run:} with the service running, post a copy of
+\fld{examples/snapshot_t2.json} with one added unknown field to
+\fld{POST /v2/world/snapshots}: 422. Post the unchanged file before
+registering its session with \fld{POST /v2/world/sessions}: 409.
+\textbf{Evidence:} Table~\ref{tab:uctests}.
+
+\subsection{Requirement Coverage}
+
+Table~\ref{tab:trace} maps the requirements to the specification and
+to the evidence available now.
+
+\section*{Scope and Verification Status}
+
+This document specifies an academic prototype rather than
+LG-approved product requirements or completed experimental results.
+The evidence above is limited to the stated scope: most end-to-end
+checks so far run inside the Orchestrator with simulated input and
+appliances. Integration of the World Model transport, the 3D
+simulation, the application, and the physical Node through the
+broker, a rehearsal with the live LLM, and latency measurement remain
+before the demonstration.
+
+\FloatBarrier
+\begin{thebibliography}{20}
+
+\bibitem{lg2024}
+LG Electronics,
+``LG to Introduce Exciting Vision for Future Living with
+LG AI Home Innovations at IFA 2024,''
+LG USA Press Release, Sep. 5, 2024.
+[Online]. Available:
+\url{https://www.lg.com/us/lg-to-introduce-exciting-vision-for-future-living-with-lg-ai-home-innovations-at-ifa-2024}.
+
+\bibitem{esphome_ld2450}
+ESPHome,
+``LD2450 Sensor,''
+ESPHome Documentation.
+[Online]. Available:
+\url{https://esphome.io/components/sensor/ld2450/}.
+
+\bibitem{hlk_ld2410c}
+Shenzhen Hi-Link Electronic Co., Ltd.,
+``HLK-LD2410C Human Presence Motion Module User Manual,''
+ver. V1.00, Nov. 7, 2022.
+[Online]. Available:
+\url{https://www.hestore.eu/en/prod_getfile.php?id=17796}
+(distributor-hosted manufacturer manual).
+
+\bibitem{mediapipe}
+Google,
+``MediaPipe Solutions Guide,''
+Google AI Edge Documentation.
+[Online]. Available:
+\url{https://developers.google.com/mediapipe}.
+
+\bibitem{blazepose}
+V. Bazarevsky, I. Grishchenko, K. Raveendran, T. Zhu,
+F. Zhang, and M. Grundmann,
+``BlazePose: On-device real-time body pose tracking,''
+arXiv preprint arXiv:2006.10204, 2020.
+
+\bibitem{arcface}
+J. Deng, J. Guo, N. Xue, and S. Zafeiriou,
+``ArcFace: Additive angular margin loss for deep face recognition,''
+in \emph{Proc. IEEE/CVF Conf. Computer Vision and
+Pattern Recognition (CVPR)}, 2019.
+
+\bibitem{mobileclip}
+P. K. A. Vasu, H. Pouransari, F. Faghri,
+R. Vemulapalli, and O. Tuzel,
+``MobileCLIP: Fast image-text models through multi-modal
+reinforced training,''
+in \emph{Proc. IEEE/CVF Conf. Computer Vision and
+Pattern Recognition (CVPR)}, 2024.
+
+\bibitem{clip}
+A. Radford \emph{et al.},
+``Learning transferable visual models from natural
+language supervision,''
+in \emph{Proc. Int. Conf. Machine Learning (ICML)}, 2021.
+
+\bibitem{yamnet}
+Google,
+``YAMNet: audio event classifier trained on AudioSet,''
+TensorFlow Models repository.
+[Online]. Available:
+\url{https://github.com/tensorflow/models/tree/master/research/audioset/yamnet}.
+
+\bibitem{whisper}
+A. Radford, J. W. Kim, T. Xu, G. Brockman,
+C. McLeavey, and I. Sutskever,
+``Robust speech recognition via large-scale weak supervision,''
+in \emph{Proc. Int. Conf. Machine Learning (ICML)}, 2023.
+
+\bibitem{mqtt}
+OASIS,
+``MQTT Version 5.0,''
+OASIS Standard, 2019.
+[Online]. Available:
+\url{https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html}.
+
+\bibitem{mosquitto}
+Eclipse Foundation,
+``Eclipse Mosquitto: an open source MQTT broker.''
+[Online]. Available:
+\url{https://mosquitto.org}.
+
+\bibitem{pydantic}
+Pydantic,
+``Pydantic Documentation.''
+[Online]. Available:
+\url{https://docs.pydantic.dev}.
+
+\bibitem{openai_struct}
+OpenAI,
+``Structured Outputs,''
+OpenAI Platform Documentation.
+[Online]. Available:
+\url{https://platform.openai.com/docs/guides/structured-outputs}.
+
+\bibitem{sklearn}
+F. Pedregosa \emph{et al.},
+``Scikit-learn: Machine learning in Python,''
+\emph{J. Machine Learning Research},
+vol. 12, pp. 2825--2830, 2011.
+
+\end{thebibliography}
+
+\end{document}
