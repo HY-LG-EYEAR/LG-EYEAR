@@ -950,6 +950,43 @@ rule (\fld{poll()}) sends a snapshot immediately on a meaningful
 change, at most once per second for value changes, and every 30
 seconds otherwise; the HTTP sender that applies it is pending.
 
+Each person entry is published in one of three location states
+(Table~\ref{tab:wm_presence}). A resident is mapped to a home-wide
+person ID through the identities configured in \fld{HomeConfig},
+whether the identity came from face or voice evidence; the profile is
+attached separately. An unidentified person receives an anonymous key
+made of the Node, its session epoch, and the local track number; when
+a restart is inferred, the epoch is incremented, which reduces reuse
+of anonymous keys across Node sessions. If tracking is lost while the
+room has stayed \textsc{Occupied} since the loss and its Node is
+fresh, the person is held in that room with an unknown posture, a null
+position, and stale evidence. Otherwise the room becomes null; an
+identified resident is removed after the memory period in
+Table~\ref{tab:wm_timing}, and an anonymous track is removed once it
+is no longer reported. An empty person list therefore never implies an
+empty room. An activity label is marked confirmed once it has been the
+track's label for the configured hold, counted from the first
+reception of that label; observation gaps are not subtracted.
+
+\begin{table}[!tbp]
+\caption{World Model Person Location States}
+\label{tab:wm_presence}
+\centering
+\footnotesize
+\begin{tabular}{@{}L{0.16\columnwidth}L{0.36\columnwidth}L{0.38\columnwidth}@{}}
+\toprule
+\textbf{State} & \textbf{Condition} & \textbf{Published fields} \\
+\midrule
+Tracked & A fresh Node message reports the person's track. &
+Room, posture, activity; room-local position when observed, otherwise null; current evidence. \\
+Held & Track lost; room continuously \textsc{Occupied} since the loss; Node fresh. &
+Room retained; posture \textsc{Unknown}; position null; activity unconfirmed; stale evidence. \\
+Location unknown & Any other case (identified residents only). &
+Room null; removed after the memory period. Anonymous tracks are not retained. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 The Orchestrator validates each snapshot (Algorithm~\ref{alg:ingest}).
 It compares only decision-relevant values (occupancy, people and
 activity, device states, routines, preferences, restrictions,
@@ -1538,13 +1575,93 @@ Unit tests cover the contract, engine, hub, and receiver. Remaining
 work: MQTT input and HTTP output, use of the boot identifier and
 status topic, and ordering of late observations across Nodes.
 
+\textbf{Ingestion and publication.} \fld{NodeHub} stamps each message
+with its reception time and places it in a bounded per-Node queue; a
+full queue drops its oldest message because every Node message
+carries the complete room state. Messages are applied to the engine
+one at a time, so order is preserved within each Node and a malformed
+stream from one Node does not block the others. Each message is
+counted per Node as accepted, restart, duplicate, out-of-order,
+invalid, unknown Node, room mismatch, or topic mismatch, together
+with queue drops. Polling runs at a short interval so that
+simultaneous room updates yield one revision. When the sender is
+slow, a waiting snapshot is replaced by the latest one; a transmission
+already in progress is not cancelled. Revisions increase within a
+World Model session, and each snapshot passes the schema and semantic
+checks before it is released (Algorithm~\ref{alg:wm}).
+Table~\ref{tab:wm_timing} lists the provisional code defaults; they
+are neither measured values nor targets agreed between modules.
+
+\begin{table}[!tbp]
+\caption{Provisional World Model Timing Defaults}
+\label{tab:wm_timing}
+\centering
+\footnotesize
+\begin{tabular}{@{}lr@{}}
+\toprule
+\textbf{Parameter} & \textbf{Default} \\
+\midrule
+Node observation freshness & 3\,s \\
+Device state freshness & 10\,s \\
+Environmental measurement freshness & 120\,s \\
+Activity confirmation hold & 3\,s \\
+Resident memory after loss (not held) & 30\,min \\
+Minimum interval for value-only updates & 1\,s \\
+Keepalive publication & 30\,s \\
+Snapshot polling interval & 0.2\,s \\
+Per-Node queue length & 20 messages \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{algorithm}[!tbp]
+\caption{World Model ingestion and snapshot publication}
+\label{alg:wm}
+\footnotesize
+\begin{algorithmic}[1]
+\Require Node message $m$ received at $r$; per-Node record $N$; home state $W$
+\If{$m$ fails schema validation}
+  \State Count as invalid; \Return
+\ElsIf{the Node of $m$ is not configured}
+  \State Count as unknown Node; \Return
+\ElsIf{the room of $m$ differs from the Node's configured room}
+  \State Count as room mismatch; \Return
+\EndIf
+\If{the event ID of $m$ was already accepted}
+  \State Count as duplicate; \Return
+\EndIf
+\If{$N$ has a previous message \textbf{and} $m.\mathit{seq} \le N.\mathit{seq}$}
+  \If{$m.\mathit{seq} = 0$ \textbf{or} $m.\mathit{time} > N.\mathit{time}$}
+    \State Infer restart: increment the epoch; release track bindings
+  \Else
+    \State Count as out-of-order; \Return
+  \EndIf
+\EndIf
+\State Update room occupancy, measurements, and $r$ in $W$
+\State Map reported tracks to resident or anonymous person keys
+\Statex \textbf{On each poll:}
+\State Mark rooms of Nodes silent beyond their TTL as \textsc{Unknown}
+\State Classify each person as tracked, held, or location unknown
+\If{semantic change \textbf{or} value change $\ge$1\,s apart \textbf{or} keepalive due}
+  \State Increment revision; validate; replace any waiting snapshot
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
 \textbf{Simulation.} \fld{demo3d.html} renders the floor plan,
 residents, Node sensor ranges, and virtual appliances with Three.js
 and plays the scenario steps. The current browser build contains its
 own simplified World Model and a mock decision module; connecting it
 to the Python World Model and the Orchestrator requires the command
 and result formats in \brk{docs/simulator-alignment.md} of the
-Orchestrator repository.
+Orchestrator repository. Residents are drawn from the snapshots of
+this browser World Model (WorldSnapshot 0.1) rather than from the
+scenario script, so held or unknown locations appear as that model
+represents them. Components exchange messages through an in-page bus
+that follows MQTT topic and wildcard rules, which is intended to ease
+a later move to networked clients. An operator can disconnect a
+simulated Node to show that its room becomes unknown rather than
+empty, and can adjust camera and radar coverage.
 
 \subsection{Module 3: Agents and Home Orchestrator}
 
